@@ -43,8 +43,8 @@ using System.Xml;
 [assembly: AssemblyDescription("Reporte HTML/PDF de cambios SVN/Git por archivo (diffs lado a lado). Autor: Jair Salda\u00f1a. Requiere svn.exe y/o git.exe")]
 [assembly: AssemblyCompany("Napse Global \u00b7 TOTVS")]
 [assembly: AssemblyCopyright("\u00a9 2026 Jair Salda\u00f1a \u00b7 Napse Global \u2014 Napse ahora es TOTVS")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
 
 namespace ReporteCambiosSvn
 {
@@ -167,6 +167,7 @@ namespace ReporteCambiosSvn
     internal class LogEntry
     {
         public string Rev = "", FullRev = "", Author = "", Date = "", Msg = "";
+        public List<string> Versiones = new List<string>();
         public List<PathItem> Targets = new List<PathItem>();
         public List<PathItem> Others = new List<PathItem>();
     }
@@ -286,7 +287,11 @@ namespace ReporteCambiosSvn
                 int esperaMs = timedOut ? 5000 : (intento == 0 ? 60000 : 30000);
                 bool ok = EsperarArchivoPdf(pdfPath, esperaMs);
                 try { Directory.Delete(perfil, true); } catch { }
-                if (ok) return;
+                if (ok)
+                {
+                    MarcarScrollContinuo(pdfPath);
+                    return;
+                }
             }
             if (ultimoErr.Length > 500) ultimoErr = ultimoErr.Substring(0, 500) + "...";
             throw new InvalidOperationException("Edge no pudo generar el PDF. Detalle: " + ultimoErr);
@@ -319,6 +324,65 @@ namespace ReporteCambiosSvn
                 System.Threading.Thread.Sleep(500);
             }
             return File.Exists(pdfPath) && new FileInfo(pdfPath).Length > 0;
+        }
+
+        // Inserta /PageLayout /OneColumn en el catalogo del PDF mediante una
+        // actualizacion incremental, para que los visores abran el documento
+        // en modo de desplazamiento continuo (scroll vertical de paginas).
+        private static void MarcarScrollContinuo(string pdfPath)
+        {
+            try
+            {
+                var lat = Encoding.GetEncoding(28591);
+                var bytes = File.ReadAllBytes(pdfPath);
+                string t = lat.GetString(bytes);
+                if (t.Contains("/PageLayout")) return;
+
+                int sxPos = t.LastIndexOf("startxref", StringComparison.Ordinal);
+                if (sxPos < 0) return;
+                var mSx = Regex.Match(t.Substring(sxPos), "startxref\\s+(\\d+)");
+                if (!mSx.Success) return;
+                string prevXref = mSx.Groups[1].Value;
+
+                string rootNum = null;
+                foreach (Match m in Regex.Matches(t, "/Root\\s+(\\d+)\\s+0\\s+R")) rootNum = m.Groups[1].Value;
+                if (rootNum == null) return;
+                string size = null;
+                foreach (Match m in Regex.Matches(t, "/Size\\s+(\\d+)")) size = m.Groups[1].Value;
+                if (size == null) return;
+                string info = null;
+                foreach (Match m in Regex.Matches(t, "/Info\\s+\\d+\\s+0\\s+R")) info = m.Value;
+
+                Match objM = null;
+                foreach (Match m in Regex.Matches(t, "(^|[\\r\\n])" + rootNum + " 0 obj\\b")) objM = m;
+                if (objM == null) return;
+                int objPos = objM.Index + objM.Groups[1].Length;
+                int dictPos = t.IndexOf("<<", objPos, StringComparison.Ordinal);
+                int endPos = t.IndexOf("endobj", objPos, StringComparison.Ordinal);
+                if (dictPos < 0 || endPos < 0 || dictPos > endPos) return;
+                string cuerpo = t.Substring(dictPos + 2, endPos - dictPos - 2).TrimEnd();
+
+                string prefijo = (bytes.Length > 0 && bytes[bytes.Length - 1] != (byte)'\n') ? "\n" : "";
+                string nuevoObj = prefijo + rootNum + " 0 obj\n<< /PageLayout /OneColumn " + cuerpo + "\nendobj\n";
+                long objOffset = bytes.Length + prefijo.Length;
+                long xrefOffset = bytes.Length + nuevoObj.Length;
+
+                var sbT = new StringBuilder();
+                sbT.Append(nuevoObj);
+                sbT.Append("xref\n");
+                sbT.Append(rootNum + " 1\n");
+                sbT.Append(objOffset.ToString("D10") + " 00000 n\r\n");
+                sbT.Append("trailer\n<< /Size " + size + " /Root " + rootNum + " 0 R" +
+                           (info != null ? " " + info : "") + " /Prev " + prevXref + " >>\n");
+                sbT.Append("startxref\n" + xrefOffset + "\n%%EOF\n");
+
+                using (var fs = new FileStream(pdfPath, FileMode.Append, FileAccess.Write))
+                {
+                    var tail = lat.GetBytes(sbT.ToString());
+                    fs.Write(tail, 0, tail.Length);
+                }
+            }
+            catch { }
         }
 
         private static void LimpiarPerfilesViejos()
@@ -410,13 +474,28 @@ namespace ReporteCambiosSvn
 
             var parsedPorRev = new Dictionary<string, List<KeyValuePair<string, FileDiff>>>();
             var modCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            int totArchivos = 0, totHunks = 0, idx = 0;
+            int totArchivos = 0, totHunks = 0, idx = 0, svnPomFallos = 0;
 
             foreach (var e in matched)
             {
                 idx++;
                 if (cancelado()) throw new OperationCanceledException("Operacion cancelada por el usuario.");
                 progress(idx, matched.Count, "Descargando diff " + prefRev + e.Rev + "  (" + idx + "/" + matched.Count + ")");
+
+                // Version: primero del mensaje del commit; si no hay, del pom.xml (Maven).
+                e.Versiones = VersionesDeMensaje(e.Msg);
+                if (e.Versiones.Count == 0)
+                {
+                    string vPom = "";
+                    if (kind == VcsKind.Git)
+                        vPom = PomVersionGit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev);
+                    else if (svnPomFallos < 2)
+                    {
+                        vPom = PomVersionSvn(url, e.Rev);
+                        if (vPom.Length == 0) svnPomFallos++;
+                    }
+                    if (vPom.Length > 0) e.Versiones.Add(vPom);
+                }
 
                 string texto = kind == VcsKind.Git
                     ? GitDiffCommit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev, e.Targets)
@@ -932,6 +1011,51 @@ namespace ReporteCambiosSvn
             return res;
         }
 
+        // Version de proyectos Maven: <project><version> (o la del <parent>) en pom.xml.
+        private static string ParsePomVersion(string xmlTexto)
+        {
+            try
+            {
+                xmlTexto = (xmlTexto ?? "").TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
+                var doc = new XmlDocument();
+                doc.LoadXml(xmlTexto);
+                var root = doc.DocumentElement;
+                if (root == null || root.LocalName != "project") return "";
+                string vParent = "";
+                foreach (XmlNode n in root.ChildNodes)
+                {
+                    if (n.NodeType != XmlNodeType.Element) continue;
+                    if (n.LocalName == "version")
+                    {
+                        var v = (n.InnerText ?? "").Trim();
+                        if (v.Length > 0) return v;
+                    }
+                    if (n.LocalName == "parent")
+                    {
+                        foreach (XmlNode c in n.ChildNodes)
+                            if (c.NodeType == XmlNodeType.Element && c.LocalName == "version")
+                                vParent = (c.InnerText ?? "").Trim();
+                    }
+                }
+                return vParent;
+            }
+            catch { return ""; }
+        }
+
+        private static string PomVersionGit(string dir, string fullRev)
+        {
+            var r = Git.Run(new[] { "-c", "core.quotepath=off", "-C", dir, "show", fullRev + ":pom.xml" });
+            if (r.ExitCode != 0) return "";
+            return ParsePomVersion(Texto.DecodeBytes(r.Bytes));
+        }
+
+        private static string PomVersionSvn(string url, string rev)
+        {
+            var r = Svn.RunRaw(new[] { "cat", "--non-interactive", "-r", rev, url + "/pom.xml@" + rev });
+            if (r.ExitCode != 0) return "";
+            return ParsePomVersion(Texto.DecodeBytes(r.Bytes));
+        }
+
         public static string DescCorta(string msg, int max)
         {
             foreach (var l in Regex.Split(msg ?? "", "\r?\n"))
@@ -1016,7 +1140,7 @@ details.file>summary{cursor:pointer;background:#f6f8fa;padding:7px 12px;font-wei
 button{background:#0969da;color:#fff;border:0;border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer;margin-right:8px}
 .nochange{background:#fff;border:1px dashed #d0d7de;border-radius:8px;padding:10px 14px;font-size:13px}
 a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
-@page{size:landscape;margin:10mm}
+@page{size:landscape;margin:8mm}
 @media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 ";
         private const string Js =
@@ -1102,7 +1226,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             sb.Append("<table class='toc'><tr><th style='width:80px'>" + colRev + "</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
             foreach (var e in matched)
             {
-                var vs = VersionesDeMensaje(e.Msg);
+                var vs = e.Versiones;
                 string vsTxt = vs.Count > 0 ? Texto.E(string.Join(", ", vs)) : "&mdash;";
                 string modsRev = string.Join(", ", e.Targets.Select(t => BaseName(t.Path))
                     .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
@@ -1115,7 +1239,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 
             foreach (var e in matched)
             {
-                var vs = VersionesDeMensaje(e.Msg);
+                var vs = e.Versiones;
                 sb.Append("<div class='card' id='r" + e.Rev + "'><div class='hd'>" + nl);
                 sb.Append("<span class='badge'>" + prefRev + e.Rev + "</span>" + nl);
                 foreach (var v in vs) sb.Append("<span class='badge ver'>v" + Texto.E(v) + "</span>" + nl);

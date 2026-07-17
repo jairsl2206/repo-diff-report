@@ -569,6 +569,48 @@ function Get-VersionesDeMensaje {
     return ,@($out)
 }
 
+# Version de proyectos Maven: <project><version> (o la del <parent>) en pom.xml.
+function Get-PomVersion {
+    param([string]$XmlTexto)
+    try {
+        $XmlTexto = ('' + $XmlTexto).TrimStart([char]0xFEFF, ' ', "`r", "`n", "`t")
+        $doc = New-Object System.Xml.XmlDocument
+        $doc.LoadXml($XmlTexto)
+        $root = $doc.DocumentElement
+        if ($null -eq $root -or $root.LocalName -ne 'project') { return '' }
+        $vParent = ''
+        foreach ($n in $root.ChildNodes) {
+            if ($n.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+            if ($n.LocalName -eq 'version') {
+                $v = ('' + $n.InnerText).Trim()
+                if ($v -ne '') { return $v }
+            }
+            if ($n.LocalName -eq 'parent') {
+                foreach ($c in $n.ChildNodes) {
+                    if ($c.NodeType -eq [System.Xml.XmlNodeType]::Element -and $c.LocalName -eq 'version') {
+                        $vParent = ('' + $c.InnerText).Trim()
+                    }
+                }
+            }
+        }
+        return $vParent
+    } catch { return '' }
+}
+
+function Get-PomVersionGit {
+    param([string]$Dir, [string]$FullRev)
+    $r = Invoke-GitRaw -Argumentos @('-c','core.quotepath=off','-C',$Dir,'show',($FullRev + ':pom.xml'))
+    if ($r.ExitCode -ne 0) { return '' }
+    return (Get-PomVersion -XmlTexto (Convert-BytesToText -Bytes $r.Bytes))
+}
+
+function Get-PomVersionSvn {
+    param([string]$Url, [string]$Rev)
+    $r = Invoke-SvnRaw -Argumentos @('cat','--non-interactive','-r',$Rev,($Url + '/pom.xml@' + $Rev))
+    if ($r.ExitCode -ne 0) { return '' }
+    return (Get-PomVersion -XmlTexto (Convert-BytesToText -Bytes $r.Bytes))
+}
+
 function Get-DescripcionCorta {
     param([string]$Msg, [int]$Max = 110)
     foreach ($l in ($Msg -split "\r?\n")) {
@@ -624,6 +666,59 @@ function Wait-ArchivoPdf {
     return ((Test-Path -LiteralPath $PdfPath) -and ((Get-Item -LiteralPath $PdfPath).Length -gt 0))
 }
 
+# Inserta /PageLayout /OneColumn en el catalogo del PDF (actualizacion incremental)
+# para que los visores abran el documento en modo de desplazamiento continuo.
+function Set-PdfScrollContinuo {
+    param([string]$PdfPath)
+    try {
+        $lat = [System.Text.Encoding]::GetEncoding(28591)
+        $bytes = [System.IO.File]::ReadAllBytes($PdfPath)
+        $t = $lat.GetString($bytes)
+        if ($t.Contains('/PageLayout')) { return }
+
+        $sxPos = $t.LastIndexOf('startxref')
+        if ($sxPos -lt 0) { return }
+        $mSx = [regex]::Match($t.Substring($sxPos), 'startxref\s+(\d+)')
+        if (-not $mSx.Success) { return }
+        $prevXref = $mSx.Groups[1].Value
+
+        $rootNum = $null
+        foreach ($m in [regex]::Matches($t, '/Root\s+(\d+)\s+0\s+R')) { $rootNum = $m.Groups[1].Value }
+        if ($null -eq $rootNum) { return }
+        $size = $null
+        foreach ($m in [regex]::Matches($t, '/Size\s+(\d+)')) { $size = $m.Groups[1].Value }
+        if ($null -eq $size) { return }
+        $info = $null
+        foreach ($m in [regex]::Matches($t, '/Info\s+\d+\s+0\s+R')) { $info = $m.Value }
+
+        $objM = $null
+        foreach ($m in [regex]::Matches($t, ('(^|[\r\n])' + $rootNum + ' 0 obj\b'))) { $objM = $m }
+        if ($null -eq $objM) { return }
+        $objPos = $objM.Index + $objM.Groups[1].Length
+        $dictPos = $t.IndexOf('<<', $objPos)
+        $endPos = $t.IndexOf('endobj', $objPos)
+        if ($dictPos -lt 0 -or $endPos -lt 0 -or $dictPos -gt $endPos) { return }
+        $cuerpo = $t.Substring($dictPos + 2, $endPos - $dictPos - 2).TrimEnd()
+
+        $prefijo = ''
+        if ($bytes.Length -gt 0 -and $bytes[$bytes.Length - 1] -ne 10) { $prefijo = "`n" }
+        $nuevoObj = ($prefijo + $rootNum + " 0 obj`n<< /PageLayout /OneColumn " + $cuerpo + "`nendobj`n")
+        $objOffset = $bytes.Length + $prefijo.Length
+        $xrefOffset = $bytes.Length + $nuevoObj.Length
+
+        $infoTxt = ''
+        if ($null -ne $info) { $infoTxt = ' ' + $info }
+        $tail = ($nuevoObj + "xref`n" + $rootNum + " 1`n" + $objOffset.ToString('D10') + " 00000 n`r`n" +
+                 "trailer`n<< /Size " + $size + ' /Root ' + $rootNum + ' 0 R' + $infoTxt + ' /Prev ' + $prevXref + " >>`n" +
+                 "startxref`n" + $xrefOffset + "`n%%EOF`n")
+        $fs = [System.IO.File]::Open($PdfPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
+        try {
+            $tb = $lat.GetBytes($tail)
+            $fs.Write($tb, 0, $tb.Length)
+        } finally { $fs.Close() }
+    } catch { }
+}
+
 function Export-HtmlAPdf {
     param([string]$HtmlPath, [string]$PdfPath)
     $edge = Find-Edge
@@ -675,7 +770,10 @@ function Export-HtmlAPdf {
         if ($timedOut) { $esperaMs = 5000 } elseif ($intento -eq 0) { $esperaMs = 60000 }
         $ok = Wait-ArchivoPdf -PdfPath $PdfPath -TimeoutMs $esperaMs
         try { Remove-Item -LiteralPath $perfil -Recurse -Force -ErrorAction SilentlyContinue } catch { }
-        if ($ok) { return }
+        if ($ok) {
+            Set-PdfScrollContinuo -PdfPath $PdfPath
+            return
+        }
     }
     if ($ultimoErr.Length -gt 500) { $ultimoErr = $ultimoErr.Substring(0, 500) + '...' }
     throw ('Edge no pudo generar el PDF. Detalle: ' + $ultimoErr)
@@ -763,10 +861,27 @@ function New-SvnChangeReport {
     $totArchivos = 0
     $totHunks = 0
     $idx = 0
+    $svnPomFallos = 0
     foreach ($e in $matched) {
         $idx++
         if ($null -ne $ShouldCancel -and (& $ShouldCancel)) { throw (New-Object System.OperationCanceledException 'Operacion cancelada por el usuario.') }
         if ($null -ne $OnProgress) { & $OnProgress $idx $matched.Count ('Descargando diff ' + $prefRev + $e.Rev + '  (' + $idx + '/' + $matched.Count + ')') }
+
+        # Version: primero del mensaje del commit; si no hay, del pom.xml (Maven).
+        $vers = Get-VersionesDeMensaje -Msg $e.Msg
+        if ($vers.Count -eq 0) {
+            $vPom = ''
+            if ($kind -eq 'git') {
+                $fullRevV = $e.Rev
+                if (('' + $e.FullRev).Trim() -ne '') { $fullRevV = $e.FullRev }
+                $vPom = Get-PomVersionGit -Dir $dirGit -FullRev $fullRevV
+            } elseif ($svnPomFallos -lt 2) {
+                $vPom = Get-PomVersionSvn -Url $url -Rev $e.Rev
+                if ($vPom -eq '') { $svnPomFallos++ }
+            }
+            if ($vPom -ne '') { $vers = @($vPom) }
+        }
+        $e | Add-Member -NotePropertyName Versiones -NotePropertyValue @($vers) -Force
 
         if ($kind -eq 'git') {
             $fullRev = $e.Rev
@@ -863,7 +978,7 @@ details.file>summary{cursor:pointer;background:#f6f8fa;padding:7px 12px;font-wei
 button{background:#0969da;color:#fff;border:0;border-radius:6px;padding:6px 12px;font-size:12.5px;cursor:pointer;margin-right:8px}
 .nochange{background:#fff;border:1px dashed #d0d7de;border-radius:8px;padding:10px 14px;font-size:13px}
 a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
-@page{size:landscape;margin:10mm}
+@page{size:landscape;margin:8mm}
 @media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 '@
     $js = ('function setAll(open){document.querySelectorAll("details.file").forEach(function(d){d.open=open;});}' +
@@ -972,7 +1087,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     if ($kind -eq 'git') { $colRev = 'Commit' }
     [void]$sb.Append("<table class='toc'><tr><th style='width:80px'>$colRev</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>$nl")
     foreach ($e in $matched) {
-        $vs = Get-VersionesDeMensaje -Msg $e.Msg
+        $vs = @($e.Versiones)
         $vsTxt = '&mdash;'
         if ($vs.Count -gt 0) { $vsTxt = HtmlEnc ($vs -join ', ') }
         $modsRev = @($e.Targets | ForEach-Object { $_.Path.Split('/')[-1] } | Sort-Object -Unique) -join ', '
@@ -981,7 +1096,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     [void]$sb.Append("</table>$nl")
 
     foreach ($e in $matched) {
-        $vs = Get-VersionesDeMensaje -Msg $e.Msg
+        $vs = @($e.Versiones)
         [void]$sb.Append(("<div class='card' id='r{0}'><div class='hd'>$nl" -f $e.Rev))
         [void]$sb.Append(("<span class='badge'>{1}{0}</span>$nl" -f $e.Rev, $prefRev))
         foreach ($v in $vs) { [void]$sb.Append(("<span class='badge ver'>v{0}</span>$nl" -f (HtmlEnc $v))) }

@@ -6,7 +6,7 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por ar
 
 - **Soporte SVN y Git** con detección automática: SVN por URL o working copy; Git por carpeta local del clon (o fuerza el tipo con `-Vcs svn|git`)
 - **Diffs lado a lado** (antes/después) estilo GitHub, con números de línea y colores, agrupados por revisión/commit y archivo
-- **Metadatos por revisión**: número, fecha, autor, versión (extraída del mensaje) y descripción del commit
+- **Metadatos por revisión**: número/commit, fecha, autor, versión (extraída del mensaje del commit o, si no hay, del `pom.xml` de proyectos Maven) y descripción
 - **Resumen por archivo** (100% regex, determinista, sin IA): líneas ±, funciones nuevas/eliminadas, llamadas, temas detectados
 - **Índice general**: revisiones, archivos afectados y archivos sin cambios en el periodo
 - **Exportación a PDF** apaisado usando Microsoft Edge integrado en Windows (headless)
