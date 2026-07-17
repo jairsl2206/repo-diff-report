@@ -638,6 +638,13 @@ body{font-family:'Segoe UI',Arial,sans-serif;margin:0;background:#f0f2f5;color:#
 h1{font-size:22px;margin:8px 0}
 h2{font-size:17px;margin:0}
 .meta{color:#57606a;font-size:12px}
+.cover{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px 22px;margin:14px 0}
+.cover .brand{font-size:11px;letter-spacing:3px;color:#57606a;text-transform:uppercase;font-weight:700}
+.cover h1{margin:6px 0 2px 0;font-size:24px}
+.cover .sub{color:#57606a;font-size:13px;margin-bottom:10px}
+table.info{border-collapse:collapse;font-size:12.5px;margin-top:6px}
+table.info td{border:1px solid #d0d7de;padding:5px 10px}
+table.info td:first-child{background:#f6f8fa;font-weight:600;width:170px;white-space:nowrap}
 .card{background:#fff;border:1px solid #d0d7de;border-radius:8px;margin:16px 0;overflow:hidden}
 .card>.hd{padding:10px 14px;background:#f6f8fa;border-bottom:1px solid #d0d7de;display:flex;flex-wrap:wrap;gap:10px;align-items:baseline}
 .badge{display:inline-block;background:#0969da;color:#fff;border-radius:12px;padding:1px 10px;font-size:12px;font-weight:600}
@@ -666,7 +673,7 @@ button{background:#0969da;color:#fff;border:0;border-radius:6px;padding:6px 12px
 .nochange{background:#fff;border:1px dashed #d0d7de;border-radius:8px;padding:10px 14px;font-size:13px}
 a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 @page{size:landscape;margin:10mm}
-@media print{ .btns{display:none} details.file{page-break-inside:avoid} body{background:#fff} }
+@media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 '@
     $js = 'function setAll(open){document.querySelectorAll("details.file").forEach(function(d){d.open=open;});}'
 
@@ -675,15 +682,24 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     $ahora = (Get-Date).ToString('yyyy-MM-dd HH:mm')
 
     [void]$sb.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>$nl")
-    [void]$sb.Append("<title>Reporte de cambios por archivo - SVN</title>$nl")
+    [void]$sb.Append("<title>Reporte de cambios por archivo - Napse Global &middot; TOTVS</title>$nl")
     [void]$sb.Append("<style>$css</style><script>$js</script></head><body><div class='wrap'>$nl")
-    [void]$sb.Append(("<h1>Reporte de cambios por archivo &mdash; {0}</h1>$nl" -f (HtmlEnc $url)))
-    [void]$sb.Append(("<div class='meta'>Rango: <b>{0} &rarr; {1}</b> &nbsp;|&nbsp; Generado: {2} &nbsp;|&nbsp; Herramienta: ReporteCambiosSVN.ps1 (solo requiere svn.exe)</div>$nl" -f (HtmlEnc $Desde), (HtmlEnc $Hasta), $ahora))
     $extsTxt = '(cualquier extensi&oacute;n)'
     if ($exts.Count -gt 0) { $extsTxt = '(.' + (HtmlEnc ($exts -join ' / .')) + ')' }
     $modsTxt = '(todos los archivos)'
     if ($mods.Count -gt 0) { $modsTxt = HtmlEnc ($mods -join ', ') }
-    [void]$sb.Append(("<div class='meta'>Filtro de archivos: {0} &nbsp;{1}</div>$nl" -f $modsTxt, $extsTxt))
+    [void]$sb.Append("<div class='cover'>$nl")
+    [void]$sb.Append("<div class='brand'>Napse Global &middot; TOTVS</div>$nl")
+    [void]$sb.Append("<h1>Reporte de cambios por archivo</h1>$nl")
+    [void]$sb.Append("<div class='sub'>Control de cambios sobre repositorio SVN</div>$nl")
+    [void]$sb.Append("<table class='info'>$nl")
+    [void]$sb.Append(("<tr><td>Repositorio</td><td>{0}</td></tr>$nl" -f (HtmlEnc $url)))
+    [void]$sb.Append(("<tr><td>Rango analizado</td><td>{0} &rarr; {1}</td></tr>$nl" -f (HtmlEnc $Desde), (HtmlEnc $Hasta)))
+    [void]$sb.Append(("<tr><td>Filtro de archivos</td><td>{0} &nbsp;{1}</td></tr>$nl" -f $modsTxt, $extsTxt))
+    [void]$sb.Append(("<tr><td>Fecha de generaci&oacute;n</td><td>{0}</td></tr>$nl" -f $ahora))
+    [void]$sb.Append("<tr><td>Autor</td><td>Jair Salda&ntilde;a</td></tr>$nl")
+    [void]$sb.Append("<tr><td>Compa&ntilde;&iacute;a</td><td>Napse Global</td></tr>$nl")
+    [void]$sb.Append("</table></div>$nl")
     [void]$sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>$nl")
 
     [void]$sb.Append(("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>{0} revisiones afectan los archivos listados. Total de cambios por archivo:</p>$nl" -f $matched.Count))
@@ -805,7 +821,8 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         [void]$sb.Append("</div>$nl")
     }
 
-    [void]$sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.ps1 (svn log --xml + svn diff -c REV). El resumen por archivo es heur&iacute;stico (regex), sin IA. Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>$nl")
+    [void]$sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.ps1 (svn log --xml + svn diff -c REV). Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>$nl")
+    [void]$sb.Append("<p class='small'>Autor: Jair Salda&ntilde;a &middot; Napse Global &mdash; <b>Napse ahora es TOTVS</b>.</p>$nl")
     [void]$sb.Append("</div></body></html>")
 
     # --- Salida ---

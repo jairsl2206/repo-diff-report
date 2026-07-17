@@ -13,6 +13,7 @@ if not exist "%CSC%" (
 )
 "%CSC%" /nologo /optimize+ /target:winexe /platform:anycpu ^
     /out:"%~dp0ReporteCambiosSVN.exe" ^
+    /win32icon:"%~dp0ReporteCambiosSVN.ico" ^
     /r:System.dll /r:System.Core.dll /r:System.Xml.dll ^
     /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
     "%~dp0ReporteCambiosSVN.cs"

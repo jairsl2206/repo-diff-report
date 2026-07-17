@@ -37,7 +37,9 @@ using System.Xml;
 
 [assembly: AssemblyTitle("ReporteCambiosSVN")]
 [assembly: AssemblyProduct("ReporteCambiosSVN")]
-[assembly: AssemblyDescription("Reporte HTML de cambios SVN por modulo (diffs lado a lado). Solo requiere svn.exe")]
+[assembly: AssemblyDescription("Reporte HTML/PDF de cambios SVN por archivo (diffs lado a lado). Autor: Jair Salda\u00f1a. Solo requiere svn.exe")]
+[assembly: AssemblyCompany("Napse Global \u00b7 TOTVS")]
+[assembly: AssemblyCopyright("\u00a9 2026 Jair Salda\u00f1a \u00b7 Napse Global \u2014 Napse ahora es TOTVS")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
 
@@ -753,6 +755,13 @@ body{font-family:'Segoe UI',Arial,sans-serif;margin:0;background:#f0f2f5;color:#
 h1{font-size:22px;margin:8px 0}
 h2{font-size:17px;margin:0}
 .meta{color:#57606a;font-size:12px}
+.cover{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px 22px;margin:14px 0}
+.cover .brand{font-size:11px;letter-spacing:3px;color:#57606a;text-transform:uppercase;font-weight:700}
+.cover h1{margin:6px 0 2px 0;font-size:24px}
+.cover .sub{color:#57606a;font-size:13px;margin-bottom:10px}
+table.info{border-collapse:collapse;font-size:12.5px;margin-top:6px}
+table.info td{border:1px solid #d0d7de;padding:5px 10px}
+table.info td:first-child{background:#f6f8fa;font-weight:600;width:170px;white-space:nowrap}
 .card{background:#fff;border:1px solid #d0d7de;border-radius:8px;margin:16px 0;overflow:hidden}
 .card>.hd{padding:10px 14px;background:#f6f8fa;border-bottom:1px solid #d0d7de;display:flex;flex-wrap:wrap;gap:10px;align-items:baseline}
 .badge{display:inline-block;background:#0969da;color:#fff;border-radius:12px;padding:1px 10px;font-size:12px;font-weight:600}
@@ -781,7 +790,7 @@ button{background:#0969da;color:#fff;border:0;border-radius:6px;padding:6px 12px
 .nochange{background:#fff;border:1px dashed #d0d7de;border-radius:8px;padding:10px 14px;font-size:13px}
 a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 @page{size:landscape;margin:10mm}
-@media print{ .btns{display:none} details.file{page-break-inside:avoid} body{background:#fff} }
+@media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 ";
         private const string Js = "function setAll(open){document.querySelectorAll(\"details.file\").forEach(function(d){d.open=open;});}";
 
@@ -795,16 +804,22 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             string ahora = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
 
             sb.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>" + nl);
-            sb.Append("<title>Reporte de cambios por archivo - SVN</title>" + nl);
+            sb.Append("<title>Reporte de cambios por archivo - Napse Global \u00b7 TOTVS</title>" + nl);
             sb.Append("<style>" + Css + "</style><script>" + Js + "</script></head><body><div class='wrap'>" + nl);
-            sb.Append("<h1>Reporte de cambios por archivo &mdash; " + Texto.E(url) + "</h1>" + nl);
-            sb.Append("<div class='meta'>Rango: <b>" + Texto.E(opt.Desde) + " &rarr; " + Texto.E(opt.Hasta) +
-                      "</b> &nbsp;|&nbsp; Generado: " + ahora +
-                      " &nbsp;|&nbsp; Herramienta: ReporteCambiosSVN.exe (solo requiere svn.exe)</div>" + nl);
             string extsTxt = exts.Count > 0 ? "(." + Texto.E(string.Join(" / .", exts)) + ")" : "(cualquier extensi&oacute;n)";
             string modsTxt = mods.Count > 0 ? Texto.E(string.Join(", ", mods)) : "(todos los archivos)";
-            sb.Append("<div class='meta'>Filtro de archivos: " + modsTxt +
-                      " &nbsp;" + extsTxt + "</div>" + nl);
+            sb.Append("<div class='cover'>" + nl);
+            sb.Append("<div class='brand'>Napse Global &middot; TOTVS</div>" + nl);
+            sb.Append("<h1>Reporte de cambios por archivo</h1>" + nl);
+            sb.Append("<div class='sub'>Control de cambios sobre repositorio SVN</div>" + nl);
+            sb.Append("<table class='info'>" + nl);
+            sb.Append("<tr><td>Repositorio</td><td>" + Texto.E(url) + "</td></tr>" + nl);
+            sb.Append("<tr><td>Rango analizado</td><td>" + Texto.E(opt.Desde) + " &rarr; " + Texto.E(opt.Hasta) + "</td></tr>" + nl);
+            sb.Append("<tr><td>Filtro de archivos</td><td>" + modsTxt + " &nbsp;" + extsTxt + "</td></tr>" + nl);
+            sb.Append("<tr><td>Fecha de generaci&oacute;n</td><td>" + ahora + "</td></tr>" + nl);
+            sb.Append("<tr><td>Autor</td><td>Jair Salda&ntilde;a</td></tr>" + nl);
+            sb.Append("<tr><td>Compa&ntilde;&iacute;a</td><td>Napse Global</td></tr>" + nl);
+            sb.Append("</table></div>" + nl);
             sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>" + nl);
 
             sb.Append("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>" + matched.Count +
@@ -941,7 +956,8 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 sb.Append("</div>" + nl);
             }
 
-            sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.exe (svn log --xml + svn diff -c REV). El resumen por archivo es heur&iacute;stico (regex), sin IA. Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>" + nl);
+            sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.exe (svn log --xml + svn diff -c REV). Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>" + nl);
+            sb.Append("<p class='small'>Autor: Jair Salda&ntilde;a &middot; Napse Global &mdash; <b>Napse ahora es TOTVS</b>.</p>" + nl);
             sb.Append("</div></body></html>");
             return sb.ToString();
         }
@@ -1069,6 +1085,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             tips = new ToolTip();
             tips.AutoPopDelay = 30000;
