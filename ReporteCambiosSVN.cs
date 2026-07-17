@@ -10,9 +10,10 @@
 //  Uso:
 //    ReporteCambiosSVN.exe                     -> interfaz grafica
 //    ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev>
-//        [-Hasta <fecha|rev|HEAD>] -Modulos "A,B,C" [-Extensiones "BAS,DAT"]
+//        [-Hasta <fecha|rev|HEAD>] -Archivos "A,B,C" [-Extensiones "BAS,DAT"]
 //        [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]
 //        [-Pdf] [-SalidaPdf archivo.pdf]
+//    (-Modulos se acepta como alias de -Archivos por compatibilidad)
 //
 //  La exportacion a PDF usa Microsoft Edge (incluido en Windows 10/11) en
 //  modo headless; si no esta disponible, el HTML se genera igual y se avisa.
@@ -156,7 +157,7 @@ namespace ReporteCambiosSvn
     {
         public string ProjectPath = "", Desde = "", Hasta = "HEAD", Salida = "";
         public List<string> Modulos = new List<string>();
-        public List<string> Extensiones = new List<string> { "BAS", "DAT" };
+        public List<string> Extensiones = new List<string>();
         public bool IncluirResumen = true;
         public bool AbrirAlTerminar = false;
         public bool ExportarPdf = false;
@@ -210,26 +211,51 @@ namespace ReporteCambiosSvn
             string dir = System.IO.Path.GetDirectoryName(pdfPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
             if (File.Exists(pdfPath)) File.Delete(pdfPath);
-            string perfil = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ReporteCambiosSVN_Edge");
             string uri = new Uri(System.IO.Path.GetFullPath(htmlPath)).AbsoluteUri;
-            var psi = new ProcessStartInfo();
-            psi.FileName = edge;
-            psi.Arguments = "--headless --disable-gpu --disable-extensions --no-first-run " +
-                            "--no-default-browser-check --user-data-dir=\"" + perfil + "\" " +
-                            "--no-pdf-header-footer --print-to-pdf-no-header " +
-                            "--print-to-pdf=\"" + pdfPath + "\" \"" + uri + "\"";
-            psi.UseShellExecute = false;
-            psi.CreateNoWindow = true;
-            using (var p = Process.Start(psi))
+
+            string ultimoErr = "";
+            string[] modos = { "--headless", "--headless=old" };
+            foreach (var modo in modos)
             {
-                if (!p.WaitForExit(300000))
+                // Perfil temporal UNICO por intento: evita bloqueos de instancias previas.
+                string perfil = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                    "RepCambiosEdge_" + Guid.NewGuid().ToString("N"));
+                try
                 {
-                    try { p.Kill(); } catch { }
-                    throw new InvalidOperationException("Tiempo de espera agotado generando el PDF (Edge).");
+                    var psi = new ProcessStartInfo();
+                    psi.FileName = edge;
+                    psi.Arguments = modo + " --disable-gpu --disable-extensions --no-first-run " +
+                                    "--no-default-browser-check --user-data-dir=\"" + perfil + "\" " +
+                                    "--no-pdf-header-footer --print-to-pdf-no-header " +
+                                    "--print-to-pdf=\"" + pdfPath + "\" \"" + uri + "\"";
+                    psi.UseShellExecute = false;
+                    psi.CreateNoWindow = true;
+                    psi.RedirectStandardOutput = true;
+                    psi.RedirectStandardError = true;
+                    using (var p = Process.Start(psi))
+                    {
+                        var errTask = Task.Run(() => p.StandardError.ReadToEnd());
+                        var outTask = Task.Run(() => p.StandardOutput.ReadToEnd());
+                        if (!p.WaitForExit(300000))
+                        {
+                            try { p.Kill(); } catch { }
+                            ultimoErr = "Tiempo de espera agotado (5 min).";
+                            continue;
+                        }
+                        string errTxt = "";
+                        try { errTxt = (errTask.Result ?? "").Trim(); } catch { }
+                        ultimoErr = "Codigo de salida " + p.ExitCode +
+                                    (errTxt.Length > 0 ? ". " + errTxt : ".");
+                    }
                 }
+                finally
+                {
+                    try { Directory.Delete(perfil, true); } catch { }
+                }
+                if (File.Exists(pdfPath) && new FileInfo(pdfPath).Length > 0) return;
             }
-            if (!File.Exists(pdfPath) || new FileInfo(pdfPath).Length == 0)
-                throw new InvalidOperationException("Edge no pudo generar el PDF (archivo vacio o inexistente).");
+            if (ultimoErr.Length > 500) ultimoErr = ultimoErr.Substring(0, 500) + "...";
+            throw new InvalidOperationException("Edge no pudo generar el PDF. Detalle: " + ultimoErr);
         }
     }
 
@@ -246,8 +272,7 @@ namespace ReporteCambiosSvn
 
             var mods = new List<string>(opt.Modulos);
             var exts = new List<string>(opt.Extensiones);
-            if (mods.Count == 0) throw new ArgumentException("Debe indicar al menos un modulo.");
-            if (exts.Count == 0) throw new ArgumentException("Debe indicar al menos una extension.");
+            if (mods.Count == 0) throw new ArgumentException("Debe indicar al menos un archivo.");
 
             string rango = RevExpr(opt.Desde) + ":" + RevExpr(opt.Hasta);
 
@@ -262,7 +287,11 @@ namespace ReporteCambiosSvn
 
             string modPat = string.Join("|", mods.Select(Regex.Escape));
             string extPat = string.Join("|", exts.Select(Regex.Escape));
-            var patron = new Regex("/(" + modPat + ")\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
+            Regex patron;
+            if (exts.Count > 0)
+                patron = new Regex("/(" + modPat + ")\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
+            else
+                patron = new Regex("/(" + modPat + ")(\\.[A-Za-z0-9]+)?$", RegexOptions.IgnoreCase);
             var patronOtraX = new Regex("/(" + modPat + ")\\.([A-Za-z0-9]+)$", RegexOptions.IgnoreCase);
 
             progress(0, 1, "Consultando log SVN...");
@@ -712,19 +741,20 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             string ahora = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
 
             sb.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>" + nl);
-            sb.Append("<title>Reporte de cambios por modulo - SVN</title>" + nl);
+            sb.Append("<title>Reporte de cambios por archivo - SVN</title>" + nl);
             sb.Append("<style>" + Css + "</style><script>" + Js + "</script></head><body><div class='wrap'>" + nl);
-            sb.Append("<h1>Reporte de cambios por m&oacute;dulo &mdash; " + Texto.E(url) + "</h1>" + nl);
+            sb.Append("<h1>Reporte de cambios por archivo &mdash; " + Texto.E(url) + "</h1>" + nl);
             sb.Append("<div class='meta'>Rango: <b>" + Texto.E(opt.Desde) + " &rarr; " + Texto.E(opt.Hasta) +
                       "</b> &nbsp;|&nbsp; Generado: " + ahora +
                       " &nbsp;|&nbsp; Herramienta: ReporteCambiosSVN.exe (solo requiere svn.exe)</div>" + nl);
-            sb.Append("<div class='meta'>Filtro de m&oacute;dulos: " + Texto.E(string.Join(", ", mods)) +
-                      " &nbsp;(." + Texto.E(string.Join(" / .", exts)) + ")</div>" + nl);
+            string extsTxt = exts.Count > 0 ? "(." + Texto.E(string.Join(" / .", exts)) + ")" : "(cualquier extensi&oacute;n)";
+            sb.Append("<div class='meta'>Filtro de archivos: " + Texto.E(string.Join(", ", mods)) +
+                      " &nbsp;" + extsTxt + "</div>" + nl);
             sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>" + nl);
 
             sb.Append("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>" + matched.Count +
-                      " revisiones afectan los m&oacute;dulos listados. Total de cambios por m&oacute;dulo:</p>" + nl);
-            sb.Append("<table class='toc'><tr><th>M&oacute;dulo</th><th># Revisiones que lo modifican</th></tr>" + nl);
+                      " revisiones afectan los archivos listados. Total de cambios por archivo:</p>" + nl);
+            sb.Append("<table class='toc'><tr><th>Archivo</th><th># Revisiones que lo modifican</th></tr>" + nl);
             foreach (var kv in modCount.OrderByDescending(k => k.Value))
                 sb.Append("<tr><td>" + Texto.E(kv.Key) + "</td><td>" + kv.Value + "</td></tr>" + nl);
             sb.Append("</table>" + nl);
@@ -732,34 +762,38 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             var sinCambios = mods.Where(m => !modCount.ContainsKey(m)).ToList();
             if (sinCambios.Count > 0)
             {
-                sb.Append("<p class='nochange'><b>M&oacute;dulos sin cambios (." + Texto.E(string.Join("/.", exts)) +
-                          ") en el periodo:</b> " + Texto.E(string.Join(", ", sinCambios)));
-                var notas = new List<string>();
-                foreach (var e in entradas)
+                string extsNota = exts.Count > 0 ? " (." + Texto.E(string.Join("/.", exts)) + ")" : "";
+                sb.Append("<p class='nochange'><b>Archivos sin cambios" + extsNota +
+                          " en el periodo:</b> " + Texto.E(string.Join(", ", sinCambios)));
+                if (exts.Count > 0)
                 {
-                    foreach (var o in e.Others)
+                    var notas = new List<string>();
+                    foreach (var e in entradas)
                     {
-                        var m2 = patronOtraX.Match(o.Path);
-                        if (!m2.Success) continue;
-                        string modU = m2.Groups[1].Value.ToUpperInvariant();
-                        string extV = m2.Groups[2].Value;
-                        bool esExtFiltrada = exts.Any(x => string.Equals(x, extV, StringComparison.OrdinalIgnoreCase));
-                        bool esSinCambio = sinCambios.Any(x => string.Equals(x, modU, StringComparison.OrdinalIgnoreCase));
-                        if (esSinCambio && !esExtFiltrada)
+                        foreach (var o in e.Others)
                         {
-                            string nota = modU + "." + extV + " (r" + e.Rev + ")";
-                            if (!notas.Contains(nota)) notas.Add(nota);
+                            var m2 = patronOtraX.Match(o.Path);
+                            if (!m2.Success) continue;
+                            string modU = m2.Groups[1].Value.ToUpperInvariant();
+                            string extV = m2.Groups[2].Value;
+                            bool esExtFiltrada = exts.Any(x => string.Equals(x, extV, StringComparison.OrdinalIgnoreCase));
+                            bool esSinCambio = sinCambios.Any(x => string.Equals(x, modU, StringComparison.OrdinalIgnoreCase));
+                            if (esSinCambio && !esExtFiltrada)
+                            {
+                                string nota = modU + "." + extV + " (r" + e.Rev + ")";
+                                if (!notas.Contains(nota)) notas.Add(nota);
+                            }
                         }
                     }
+                    if (notas.Count > 0)
+                        sb.Append("<br><span class='small'>Nota: hubo cambios con otra extensi&oacute;n (fuera del filtro): " +
+                                  Texto.E(string.Join(", ", notas.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))) + "</span>");
                 }
-                if (notas.Count > 0)
-                    sb.Append("<br><span class='small'>Nota: hubo cambios con otra extensi&oacute;n (fuera del filtro): " +
-                              Texto.E(string.Join(", ", notas.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))) + "</span>");
                 sb.Append("</p>" + nl);
             }
 
             sb.Append("<h2>&Iacute;ndice de revisiones</h2>" + nl);
-            sb.Append("<table class='toc'><tr><th style='width:70px'>Revisi&oacute;n</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>M&oacute;dulos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
+            sb.Append("<table class='toc'><tr><th style='width:70px'>Revisi&oacute;n</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
             foreach (var e in matched)
             {
                 var vs = VersionesDeMensaje(e.Msg);
@@ -861,7 +895,16 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     // ------------------------------------------------------------------ GUI
     internal class MainForm : Form
     {
-        private const string DefaultMods = "SUBTSPAG,SUBTSCOB,SUBTSARH,SUBFUE3C,UPDPREFK,USRTTLOG,USRTPRO2,SUBTPAG,USRTVTOL,SUBTSPAP,USRTPROM,USRTMKPL,USRTIMPR,USRBDATA,SUBDESC,SUBTSOOL,USRTSUSP,USRTCORE,USRTDATA,USRTDUMP,USRTFUNC,STSEMV3,SUBTSTRS";
+        private const string TtProj = "URL del repositorio SVN (https://...) o carpeta local de un working copy.\r\nEjemplo: https://servidor/svn/repo/trunk";
+        private const string TtDesde = "Inicio del rango a analizar.\r\nAcepta fecha (YYYY-MM-DD) o numero de revision.\r\nEjemplos: 2025-08-01  |  31490";
+        private const string TtHasta = "Fin del rango a analizar.\r\nAcepta fecha (YYYY-MM-DD), numero de revision o HEAD (ultima revision).";
+        private const string TtArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).\r\nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP\r\nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio.";
+        private const string TtExts = "Extensiones a considerar, separadas por coma. Ejemplo: BAS,DAT\r\nVacio = cualquier extension.";
+        private const string TtResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):\r\nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.\r\nNo usa IA ni servicios externos: el resultado es determinista.";
+        private const string TtSalida = "Ruta del archivo HTML a generar.\r\nVacio = se crea automaticamente en el Escritorio.";
+        private const string TtAbrir = "Al terminar, abre el PDF (si se exporto) o el HTML.";
+        private const string TtPdf = "Ademas del HTML, genera un PDF en hoja apaisada.\r\nUsa Microsoft Edge incluido en Windows 10/11 en modo oculto.\r\nSi Edge no esta disponible, el HTML se genera igual y se muestra un aviso.";
+        private const string TtEstado = "Requisito: cliente svn.exe en el PATH.";
 
         private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida;
         private CheckBox chkResumen, chkAbrir, chkPdf;
@@ -869,6 +912,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         private Label lblEstado;
         private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida;
         private BackgroundWorker bw;
+        private ToolTip tips;
 
         public MainForm()
         {
@@ -879,49 +923,66 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
 
+            tips = new ToolTip();
+            tips.AutoPopDelay = 30000;
+            tips.InitialDelay = 350;
+            tips.ReshowDelay = 100;
+
             int y = 15;
-            AddLbl("Proyecto SVN (URL o carpeta local del working copy):", 15, y, 500);
+            var lProj = AddLbl("Proyecto SVN:", 15, y, 500);
             y += 20;
             txtProj = AddTxt(15, y, 580);
             btnDir = AddBtn("Carpeta...", 605, y - 1, 85, 25);
             btnDir.Click += BtnDir_Click;
+            tips.SetToolTip(lProj, TtProj);
+            tips.SetToolTip(txtProj, TtProj);
+            tips.SetToolTip(btnDir, "Seleccionar la carpeta de un working copy local.");
 
             y += 38;
-            AddLbl("Desde (fecha YYYY-MM-DD o revision):", 15, y, 280);
-            AddLbl("Hasta (fecha, revision o HEAD):", 320, y, 280);
+            var lDesde = AddLbl("Desde:", 15, y, 280);
+            var lHasta = AddLbl("Hasta:", 320, y, 280);
             y += 20;
             txtDesde = AddTxt(15, y, 280);
-            txtDesde.Text = DateTime.Now.AddMonths(-6).ToString("yyyy-MM-dd");
             txtHasta = AddTxt(320, y, 280);
             txtHasta.Text = "HEAD";
+            tips.SetToolTip(lDesde, TtDesde);
+            tips.SetToolTip(txtDesde, TtDesde);
+            tips.SetToolTip(lHasta, TtHasta);
+            tips.SetToolTip(txtHasta, TtHasta);
 
             y += 38;
-            AddLbl("Modulos a identificar (separados por coma):", 15, y, 500);
+            var lArch = AddLbl("Archivos a identificar:", 15, y, 500);
             y += 20;
             txtMods = AddTxt(15, y, 675);
             txtMods.Multiline = true;
             txtMods.ScrollBars = ScrollBars.Vertical;
             txtMods.Height = 62;
-            txtMods.Text = DefaultMods;
+            tips.SetToolTip(lArch, TtArchivos);
+            tips.SetToolTip(txtMods, TtArchivos);
 
             y += 75;
-            AddLbl("Extensiones (separadas por coma):", 15, y, 280);
+            var lExts = AddLbl("Extensiones:", 15, y, 280);
             y += 20;
             txtExts = AddTxt(15, y, 280);
-            txtExts.Text = "BAS,DAT";
+            tips.SetToolTip(lExts, TtExts);
+            tips.SetToolTip(txtExts, TtExts);
             chkResumen = new CheckBox();
-            chkResumen.Text = "Incluir resumen por archivo (heuristico, sin IA)";
+            chkResumen.Text = "Incluir resumen por archivo";
             chkResumen.Location = new Point(320, y - 2);
             chkResumen.Size = new Size(370, 23);
             chkResumen.Checked = true;
             Controls.Add(chkResumen);
+            tips.SetToolTip(chkResumen, TtResumen);
 
             y += 38;
-            AddLbl("Archivo de salida (vacio = autogenerado en Escritorio):", 15, y, 500);
+            var lSalida = AddLbl("Archivo de salida:", 15, y, 500);
             y += 20;
             txtSalida = AddTxt(15, y, 580);
             btnSalida = AddBtn("Guardar...", 605, y - 1, 85, 25);
             btnSalida.Click += BtnSalida_Click;
+            tips.SetToolTip(lSalida, TtSalida);
+            tips.SetToolTip(txtSalida, TtSalida);
+            tips.SetToolTip(btnSalida, "Elegir donde guardar el HTML.");
 
             y += 34;
             chkAbrir = new CheckBox();
@@ -930,11 +991,13 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             chkAbrir.Size = new Size(300, 23);
             chkAbrir.Checked = true;
             Controls.Add(chkAbrir);
+            tips.SetToolTip(chkAbrir, TtAbrir);
             chkPdf = new CheckBox();
-            chkPdf.Text = "Exportar tambien a PDF (usa Edge integrado)";
+            chkPdf.Text = "Exportar tambien a PDF";
             chkPdf.Location = new Point(320, y);
             chkPdf.Size = new Size(370, 23);
             Controls.Add(chkPdf);
+            tips.SetToolTip(chkPdf, TtPdf);
 
             y += 32;
             pb = new ProgressBar();
@@ -944,7 +1007,8 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             pb.Maximum = 100;
             Controls.Add(pb);
             y += 24;
-            lblEstado = AddLbl("Listo. Solo se requiere svn.exe en el PATH.", 15, y, 675);
+            lblEstado = AddLbl("Listo.", 15, y, 675);
+            tips.SetToolTip(lblEstado, TtEstado);
 
             y += 28;
             btnGo = AddBtn("Generar reporte", 15, y, 140, 30);
@@ -1025,7 +1089,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 if (!Svn.Disponible()) throw new InvalidOperationException("No se encontro svn.exe en el PATH.");
                 if (txtProj.Text.Trim().Length == 0) throw new ArgumentException("Indique la URL o carpeta del proyecto SVN.");
                 if (txtDesde.Text.Trim().Length == 0) throw new ArgumentException("Indique el valor \"Desde\" (fecha o revision).");
-                if (txtMods.Text.Trim().Length == 0) throw new ArgumentException("Indique al menos un modulo.");
+                if (txtMods.Text.Trim().Length == 0) throw new ArgumentException("Indique al menos un archivo.");
 
                 var opt = new ReportOptions();
                 opt.ProjectPath = txtProj.Text.Trim();
@@ -1166,9 +1230,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             return "Uso:\r\n" +
                    "  ReporteCambiosSVN.exe                          (interfaz grafica)\r\n" +
                    "  ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev>\r\n" +
-                   "      [-Hasta <fecha|rev|HEAD>] -Modulos \"A,B,C\" [-Extensiones \"BAS,DAT\"]\r\n" +
+                   "      [-Hasta <fecha|rev|HEAD>] -Archivos \"A,B,C\" [-Extensiones \"BAS,DAT\"]\r\n" +
                    "      [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]\r\n" +
                    "      [-Pdf] [-SalidaPdf archivo.pdf]\r\n" +
+                   "Notas: -Modulos es alias de -Archivos. Extensiones vacio = cualquier extension.\r\n" +
                    "Dependencia: solo svn.exe en el PATH. El PDF usa Edge integrado en Windows.";
         }
 
@@ -1181,7 +1246,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 if (a == "-projectpath") opt.ProjectPath = Next(args, ref i, a);
                 else if (a == "-desde") opt.Desde = Next(args, ref i, a);
                 else if (a == "-hasta") opt.Hasta = Next(args, ref i, a);
-                else if (a == "-modulos") opt.Modulos = Texto.SplitLista(Next(args, ref i, a));
+                else if (a == "-archivos" || a == "-modulos") opt.Modulos = Texto.SplitLista(Next(args, ref i, a));
                 else if (a == "-extensiones") opt.Extensiones = Texto.SplitLista(Next(args, ref i, a));
                 else if (a == "-salida") opt.Salida = Next(args, ref i, a);
                 else if (a == "-sinresumen") opt.IncluirResumen = false;
@@ -1193,8 +1258,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             }
             if (opt.ProjectPath.Trim().Length == 0) throw new ArgumentException("Falta -ProjectPath (URL o carpeta local del proyecto SVN).");
             if (opt.Desde.Trim().Length == 0) throw new ArgumentException("Falta -Desde (fecha YYYY-MM-DD o revision).");
-            if (opt.Modulos.Count == 0) throw new ArgumentException("Falta -Modulos (lista separada por coma).");
-            if (opt.Extensiones.Count == 0) opt.Extensiones = new List<string> { "BAS", "DAT" };
+            if (opt.Modulos.Count == 0) throw new ArgumentException("Falta -Archivos (lista separada por coma).");
             if (opt.Hasta.Trim().Length == 0) opt.Hasta = "HEAD";
             return opt;
         }
