@@ -1,0 +1,11 @@
+# Binarios compilados (se distribuyen via Releases)
+*.exe
+*.pdb
+
+# Salidas de reportes
+*.html
+*.pdf
+
+# Temporales
+*.tmp
+Thumbs.db
