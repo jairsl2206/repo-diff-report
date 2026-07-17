@@ -211,51 +211,100 @@ namespace ReporteCambiosSvn
             string dir = System.IO.Path.GetDirectoryName(pdfPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
             if (File.Exists(pdfPath)) File.Delete(pdfPath);
+            LimpiarPerfilesViejos();
             string uri = new Uri(System.IO.Path.GetFullPath(htmlPath)).AbsoluteUri;
 
             string ultimoErr = "";
             string[] modos = { "--headless", "--headless=old" };
-            foreach (var modo in modos)
+            for (int intento = 0; intento < modos.Length; intento++)
             {
                 // Perfil temporal UNICO por intento: evita bloqueos de instancias previas.
                 string perfil = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
                     "RepCambiosEdge_" + Guid.NewGuid().ToString("N"));
-                try
+                bool timedOut = false;
+                var psi = new ProcessStartInfo();
+                psi.FileName = edge;
+                psi.Arguments = modos[intento] + " --disable-gpu --disable-extensions --no-first-run " +
+                                "--no-default-browser-check --user-data-dir=\"" + perfil + "\" " +
+                                "--no-pdf-header-footer --print-to-pdf-no-header " +
+                                "--print-to-pdf=\"" + pdfPath + "\" \"" + uri + "\"";
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                using (var p = Process.Start(psi))
                 {
-                    var psi = new ProcessStartInfo();
-                    psi.FileName = edge;
-                    psi.Arguments = modo + " --disable-gpu --disable-extensions --no-first-run " +
-                                    "--no-default-browser-check --user-data-dir=\"" + perfil + "\" " +
-                                    "--no-pdf-header-footer --print-to-pdf-no-header " +
-                                    "--print-to-pdf=\"" + pdfPath + "\" \"" + uri + "\"";
-                    psi.UseShellExecute = false;
-                    psi.CreateNoWindow = true;
-                    psi.RedirectStandardOutput = true;
-                    psi.RedirectStandardError = true;
-                    using (var p = Process.Start(psi))
+                    var errTask = Task.Run(() => p.StandardError.ReadToEnd());
+                    var outTask = Task.Run(() => p.StandardOutput.ReadToEnd());
+                    if (!p.WaitForExit(300000))
                     {
-                        var errTask = Task.Run(() => p.StandardError.ReadToEnd());
-                        var outTask = Task.Run(() => p.StandardOutput.ReadToEnd());
-                        if (!p.WaitForExit(300000))
-                        {
-                            try { p.Kill(); } catch { }
-                            ultimoErr = "Tiempo de espera agotado (5 min).";
-                            continue;
-                        }
+                        try { p.Kill(); } catch { }
+                        ultimoErr = "Tiempo de espera agotado (5 min).";
+                        timedOut = true;
+                    }
+                    else
+                    {
                         string errTxt = "";
                         try { errTxt = (errTask.Result ?? "").Trim(); } catch { }
                         ultimoErr = "Codigo de salida " + p.ExitCode +
                                     (errTxt.Length > 0 ? ". " + errTxt : ".");
                     }
                 }
-                finally
-                {
-                    try { Directory.Delete(perfil, true); } catch { }
-                }
-                if (File.Exists(pdfPath) && new FileInfo(pdfPath).Length > 0) return;
+                // Edge puede delegar la impresion a un proceso hijo y salir de inmediato
+                // (codigo 0): esperar a que el PDF aparezca y termine de escribirse.
+                int esperaMs = timedOut ? 5000 : (intento == 0 ? 60000 : 30000);
+                bool ok = EsperarArchivoPdf(pdfPath, esperaMs);
+                try { Directory.Delete(perfil, true); } catch { }
+                if (ok) return;
             }
             if (ultimoErr.Length > 500) ultimoErr = ultimoErr.Substring(0, 500) + "...";
             throw new InvalidOperationException("Edge no pudo generar el PDF. Detalle: " + ultimoErr);
+        }
+
+        private static bool EsperarArchivoPdf(string pdfPath, int timeoutMs)
+        {
+            var sw = Stopwatch.StartNew();
+            long ultimo = -1;
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                try
+                {
+                    if (File.Exists(pdfPath))
+                    {
+                        long len = new FileInfo(pdfPath).Length;
+                        if (len > 0 && len == ultimo)
+                        {
+                            try
+                            {
+                                using (var fs = new FileStream(pdfPath, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+                                return true;
+                            }
+                            catch (IOException) { }
+                        }
+                        ultimo = len;
+                    }
+                }
+                catch { }
+                System.Threading.Thread.Sleep(500);
+            }
+            return File.Exists(pdfPath) && new FileInfo(pdfPath).Length > 0;
+        }
+
+        private static void LimpiarPerfilesViejos()
+        {
+            try
+            {
+                foreach (var d in Directory.GetDirectories(System.IO.Path.GetTempPath(), "RepCambiosEdge_*"))
+                {
+                    try
+                    {
+                        if (Directory.GetCreationTimeUtc(d) < DateTime.UtcNow.AddHours(-6))
+                            Directory.Delete(d, true);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
     }
 
@@ -272,7 +321,6 @@ namespace ReporteCambiosSvn
 
             var mods = new List<string>(opt.Modulos);
             var exts = new List<string>(opt.Extensiones);
-            if (mods.Count == 0) throw new ArgumentException("Debe indicar al menos un archivo.");
 
             string rango = RevExpr(opt.Desde) + ":" + RevExpr(opt.Hasta);
 
@@ -288,10 +336,14 @@ namespace ReporteCambiosSvn
             string modPat = string.Join("|", mods.Select(Regex.Escape));
             string extPat = string.Join("|", exts.Select(Regex.Escape));
             Regex patron;
-            if (exts.Count > 0)
+            if (mods.Count > 0 && exts.Count > 0)
                 patron = new Regex("/(" + modPat + ")\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
-            else
+            else if (mods.Count > 0)
                 patron = new Regex("/(" + modPat + ")(\\.[A-Za-z0-9]+)?$", RegexOptions.IgnoreCase);
+            else if (exts.Count > 0)
+                patron = new Regex("\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
+            else
+                patron = new Regex(".", RegexOptions.IgnoreCase); // todos los archivos
             var patronOtraX = new Regex("/(" + modPat + ")\\.([A-Za-z0-9]+)$", RegexOptions.IgnoreCase);
 
             progress(0, 1, "Consultando log SVN...");
@@ -477,8 +529,10 @@ namespace ReporteCambiosSvn
                     foreach (XmlNode p in paths)
                     {
                         var aAttr = p.Attributes != null ? p.Attributes["action"] : null;
+                        var kAttr = p.Attributes != null ? p.Attributes["kind"] : null;
+                        bool esDir = kAttr != null && kAttr.Value == "dir";
                         var item = new PathItem { Action = aAttr != null ? aAttr.Value : "", Path = p.InnerText };
-                        if (patron.IsMatch(item.Path)) e.Targets.Add(item);
+                        if (!esDir && patron.IsMatch(item.Path)) e.Targets.Add(item);
                         else e.Others.Add(item);
                     }
                 }
@@ -748,7 +802,8 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                       "</b> &nbsp;|&nbsp; Generado: " + ahora +
                       " &nbsp;|&nbsp; Herramienta: ReporteCambiosSVN.exe (solo requiere svn.exe)</div>" + nl);
             string extsTxt = exts.Count > 0 ? "(." + Texto.E(string.Join(" / .", exts)) + ")" : "(cualquier extensi&oacute;n)";
-            sb.Append("<div class='meta'>Filtro de archivos: " + Texto.E(string.Join(", ", mods)) +
+            string modsTxt = mods.Count > 0 ? Texto.E(string.Join(", ", mods)) : "(todos los archivos)";
+            sb.Append("<div class='meta'>Filtro de archivos: " + modsTxt +
                       " &nbsp;" + extsTxt + "</div>" + nl);
             sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>" + nl);
 
@@ -898,7 +953,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         private const string TtProj = "URL del repositorio SVN (https://...) o carpeta local de un working copy.\r\nEjemplo: https://servidor/svn/repo/trunk";
         private const string TtDesde = "Inicio del rango a analizar.\r\nAcepta fecha (YYYY-MM-DD) o numero de revision.\r\nEjemplos: 2025-08-01  |  31490";
         private const string TtHasta = "Fin del rango a analizar.\r\nAcepta fecha (YYYY-MM-DD), numero de revision o HEAD (ultima revision).";
-        private const string TtArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).\r\nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP\r\nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio.";
+        private const string TtArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).\r\nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP\r\nVacio = se incluyen TODOS los archivos modificados.\r\nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio.";
         private const string TtExts = "Extensiones a considerar, separadas por coma. Ejemplo: BAS,DAT\r\nVacio = cualquier extension.";
         private const string TtResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):\r\nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.\r\nNo usa IA ni servicios externos: el resultado es determinista.";
         private const string TtSalida = "Ruta del archivo HTML a generar.\r\nVacio = se crea automaticamente en el Escritorio.";
@@ -913,6 +968,98 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida;
         private BackgroundWorker bw;
         private ToolTip tips;
+        private const string PhArchivos = "Vacio = todos los archivos. Ej: SUBTSPAG,USRTTLOG,USRTDUMP";
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+        private const int EM_SETCUEBANNER = 0x1501;
+
+        private static void SetPlaceholder(TextBox t, string texto)
+        {
+            SendMessage(t.Handle, EM_SETCUEBANNER, (IntPtr)1, texto);
+        }
+
+        private void SetPlaceholderMultilinea(TextBox t, string texto)
+        {
+            t.GotFocus += delegate
+            {
+                if (t.ForeColor == Color.Gray) { t.Text = ""; t.ForeColor = SystemColors.WindowText; }
+            };
+            t.LostFocus += delegate
+            {
+                if (t.Text.Trim().Length == 0) { t.ForeColor = Color.Gray; t.Text = texto; }
+            };
+            if (t.Text.Trim().Length == 0) { t.ForeColor = Color.Gray; t.Text = texto; }
+        }
+
+        private static string TextoReal(TextBox t)
+        {
+            return t.ForeColor == Color.Gray ? "" : t.Text;
+        }
+
+        private static void SetTextoReal(TextBox t, string valor, string placeholder)
+        {
+            if (!string.IsNullOrEmpty(valor)) { t.ForeColor = SystemColors.WindowText; t.Text = valor; }
+            else { t.ForeColor = Color.Gray; t.Text = placeholder; }
+        }
+
+        private static string ConfigPath
+        {
+            get
+            {
+                return System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "ReporteCambiosSVN", "ultima_config.txt");
+            }
+        }
+
+        private void GuardarConfig()
+        {
+            try
+            {
+                string dir = System.IO.Path.GetDirectoryName(ConfigPath);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                var lineas = new List<string>
+                {
+                    "proyecto=" + txtProj.Text.Trim(),
+                    "desde=" + txtDesde.Text.Trim(),
+                    "hasta=" + txtHasta.Text.Trim(),
+                    "archivos=" + TextoReal(txtMods).Trim(),
+                    "extensiones=" + txtExts.Text.Trim(),
+                    "salida=" + txtSalida.Text.Trim(),
+                    "resumen=" + (chkResumen.Checked ? "1" : "0"),
+                    "abrir=" + (chkAbrir.Checked ? "1" : "0"),
+                    "pdf=" + (chkPdf.Checked ? "1" : "0")
+                };
+                File.WriteAllLines(ConfigPath, lineas, new UTF8Encoding(true));
+            }
+            catch { }
+        }
+
+        private void CargarConfig()
+        {
+            try
+            {
+                if (!File.Exists(ConfigPath)) return;
+                var cfg = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var ln in File.ReadAllLines(ConfigPath, Encoding.UTF8))
+                {
+                    int p = ln.IndexOf('=');
+                    if (p > 0) cfg[ln.Substring(0, p)] = ln.Substring(p + 1);
+                }
+                string v;
+                if (cfg.TryGetValue("proyecto", out v)) txtProj.Text = v;
+                if (cfg.TryGetValue("desde", out v)) txtDesde.Text = v;
+                if (cfg.TryGetValue("hasta", out v) && v.Trim().Length > 0) txtHasta.Text = v;
+                if (cfg.TryGetValue("archivos", out v)) SetTextoReal(txtMods, v, PhArchivos);
+                if (cfg.TryGetValue("extensiones", out v)) txtExts.Text = v;
+                if (cfg.TryGetValue("salida", out v)) txtSalida.Text = v;
+                if (cfg.TryGetValue("resumen", out v)) chkResumen.Checked = v != "0";
+                if (cfg.TryGetValue("abrir", out v)) chkAbrir.Checked = v != "0";
+                if (cfg.TryGetValue("pdf", out v)) chkPdf.Checked = v == "1";
+            }
+            catch { }
+        }
 
         public MainForm()
         {
@@ -937,6 +1084,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             tips.SetToolTip(lProj, TtProj);
             tips.SetToolTip(txtProj, TtProj);
             tips.SetToolTip(btnDir, "Seleccionar la carpeta de un working copy local.");
+            SetPlaceholder(txtProj, "https://servidor/svn/repo/trunk  o  C:\\ruta\\workingcopy");
 
             y += 38;
             var lDesde = AddLbl("Desde:", 15, y, 280);
@@ -949,6 +1097,8 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             tips.SetToolTip(txtDesde, TtDesde);
             tips.SetToolTip(lHasta, TtHasta);
             tips.SetToolTip(txtHasta, TtHasta);
+            SetPlaceholder(txtDesde, "Fecha YYYY-MM-DD o revision. Ej: 2025-08-01 | 31490");
+            SetPlaceholder(txtHasta, "Fecha YYYY-MM-DD, revision o HEAD");
 
             y += 38;
             var lArch = AddLbl("Archivos a identificar:", 15, y, 500);
@@ -959,6 +1109,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             txtMods.Height = 62;
             tips.SetToolTip(lArch, TtArchivos);
             tips.SetToolTip(txtMods, TtArchivos);
+            SetPlaceholderMultilinea(txtMods, PhArchivos);
 
             y += 75;
             var lExts = AddLbl("Extensiones:", 15, y, 280);
@@ -966,6 +1117,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             txtExts = AddTxt(15, y, 280);
             tips.SetToolTip(lExts, TtExts);
             tips.SetToolTip(txtExts, TtExts);
+            SetPlaceholder(txtExts, "Vacio = todas. Ej: BAS,DAT");
             chkResumen = new CheckBox();
             chkResumen.Text = "Incluir resumen por archivo";
             chkResumen.Location = new Point(320, y - 2);
@@ -983,6 +1135,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             tips.SetToolTip(lSalida, TtSalida);
             tips.SetToolTip(txtSalida, TtSalida);
             tips.SetToolTip(btnSalida, "Elegir donde guardar el HTML.");
+            SetPlaceholder(txtSalida, "Vacio = autogenerado en el Escritorio");
 
             y += 34;
             chkAbrir = new CheckBox();
@@ -1025,6 +1178,9 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             bw.DoWork += Bw_DoWork;
             bw.ProgressChanged += Bw_ProgressChanged;
             bw.RunWorkerCompleted += Bw_RunWorkerCompleted;
+
+            CargarConfig();
+            FormClosing += delegate { GuardarConfig(); };
         }
 
         private Label AddLbl(string txt, int x, int y, int w)
@@ -1089,18 +1245,18 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 if (!Svn.Disponible()) throw new InvalidOperationException("No se encontro svn.exe en el PATH.");
                 if (txtProj.Text.Trim().Length == 0) throw new ArgumentException("Indique la URL o carpeta del proyecto SVN.");
                 if (txtDesde.Text.Trim().Length == 0) throw new ArgumentException("Indique el valor \"Desde\" (fecha o revision).");
-                if (txtMods.Text.Trim().Length == 0) throw new ArgumentException("Indique al menos un archivo.");
 
                 var opt = new ReportOptions();
                 opt.ProjectPath = txtProj.Text.Trim();
                 opt.Desde = txtDesde.Text.Trim();
                 opt.Hasta = txtHasta.Text.Trim().Length > 0 ? txtHasta.Text.Trim() : "HEAD";
-                opt.Modulos = Texto.SplitLista(txtMods.Text);
+                opt.Modulos = Texto.SplitLista(TextoReal(txtMods));
                 opt.Extensiones = Texto.SplitLista(txtExts.Text);
                 opt.Salida = txtSalida.Text.Trim();
                 opt.IncluirResumen = chkResumen.Checked;
                 opt.ExportarPdf = chkPdf.Checked;
 
+                GuardarConfig();
                 SetBusy(true);
                 pb.Value = 0;
                 bw.RunWorkerAsync(opt);
@@ -1230,10 +1386,11 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             return "Uso:\r\n" +
                    "  ReporteCambiosSVN.exe                          (interfaz grafica)\r\n" +
                    "  ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev>\r\n" +
-                   "      [-Hasta <fecha|rev|HEAD>] -Archivos \"A,B,C\" [-Extensiones \"BAS,DAT\"]\r\n" +
+                   "      [-Hasta <fecha|rev|HEAD>] [-Archivos \"A,B,C\"] [-Extensiones \"BAS,DAT\"]\r\n" +
                    "      [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]\r\n" +
                    "      [-Pdf] [-SalidaPdf archivo.pdf]\r\n" +
-                   "Notas: -Modulos es alias de -Archivos. Extensiones vacio = cualquier extension.\r\n" +
+                   "Notas: -Modulos es alias de -Archivos. Sin -Archivos y/o sin -Extensiones\r\n" +
+                   "       se incluyen TODOS los archivos / cualquier extension.\r\n" +
                    "Dependencia: solo svn.exe en el PATH. El PDF usa Edge integrado en Windows.";
         }
 
@@ -1258,7 +1415,6 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             }
             if (opt.ProjectPath.Trim().Length == 0) throw new ArgumentException("Falta -ProjectPath (URL o carpeta local del proyecto SVN).");
             if (opt.Desde.Trim().Length == 0) throw new ArgumentException("Falta -Desde (fecha YYYY-MM-DD o revision).");
-            if (opt.Modulos.Count == 0) throw new ArgumentException("Falta -Archivos (lista separada por coma).");
             if (opt.Hasta.Trim().Length == 0) opt.Hasta = "HEAD";
             return opt;
         }

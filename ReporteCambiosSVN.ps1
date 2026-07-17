@@ -24,6 +24,7 @@
 
 .PARAMETER Archivos
     Lista de archivos a identificar, separados por coma. Ej: "SUBTSPAG,USRTTLOG,USRTDUMP"
+    Vacio/omitido = se incluyen TODOS los archivos modificados.
     (-Modulos se acepta como alias por compatibilidad).
 
 .PARAMETER Extensiones
@@ -200,8 +201,9 @@ function Get-LogEntradas {
         $otros   = New-Object System.Collections.ArrayList
         foreach ($p in @($le.SelectNodes('paths/path'))) {
             $ruta = '' + $p.InnerText
+            $esDir = (('' + $p.GetAttribute('kind')) -eq 'dir')
             $item = New-Object PSObject -Property @{ Action = ('' + $p.GetAttribute('action')); Path = $ruta }
-            if ($Patron.IsMatch($ruta)) { [void]$targets.Add($item) } else { [void]$otros.Add($item) }
+            if (-not $esDir -and $Patron.IsMatch($ruta)) { [void]$targets.Add($item) } else { [void]$otros.Add($item) }
         }
         [void]$entradas.Add((New-Object PSObject -Property @{
             Rev     = ('' + $le.GetAttribute('revision'))
@@ -441,6 +443,29 @@ function Find-Edge {
     return $null
 }
 
+function Wait-ArchivoPdf {
+    param([string]$PdfPath, [int]$TimeoutMs)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $ultimo = -1
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        try {
+            if (Test-Path -LiteralPath $PdfPath) {
+                $len = (Get-Item -LiteralPath $PdfPath).Length
+                if ($len -gt 0 -and $len -eq $ultimo) {
+                    try {
+                        $fs = [System.IO.File]::Open($PdfPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+                        $fs.Close()
+                        return $true
+                    } catch { }
+                }
+                $ultimo = $len
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 500
+    }
+    return ((Test-Path -LiteralPath $PdfPath) -and ((Get-Item -LiteralPath $PdfPath).Length -gt 0))
+}
+
 function Export-HtmlAPdf {
     param([string]$HtmlPath, [string]$PdfPath)
     $edge = Find-Edge
@@ -450,37 +475,49 @@ function Export-HtmlAPdf {
     $dir = Split-Path -Parent $PdfPath
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     if (Test-Path -LiteralPath $PdfPath) { Remove-Item -LiteralPath $PdfPath -Force }
+    try {
+        foreach ($d in @(Get-ChildItem ([System.IO.Path]::GetTempPath()) -Directory -Filter 'RepCambiosEdge_*' -ErrorAction SilentlyContinue)) {
+            if ($d.CreationTimeUtc -lt (Get-Date).ToUniversalTime().AddHours(-6)) {
+                Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch { }
     $uri = ([System.Uri](Resolve-Path -LiteralPath $HtmlPath).Path).AbsoluteUri
     $ultimoErr = ''
-    foreach ($modo in @('--headless','--headless=old')) {
+    $modos = @('--headless','--headless=old')
+    for ($intento = 0; $intento -lt $modos.Count; $intento++) {
         # Perfil temporal UNICO por intento: evita bloqueos de instancias previas.
         $perfil = Join-Path ([System.IO.Path]::GetTempPath()) ('RepCambiosEdge_' + [Guid]::NewGuid().ToString('N'))
-        try {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $edge
-            $psi.Arguments = ($modo + ' --disable-gpu --disable-extensions --no-first-run --no-default-browser-check ' +
-                              '--user-data-dir="' + $perfil + '" --no-pdf-header-footer --print-to-pdf-no-header ' +
-                              '--print-to-pdf="' + $PdfPath + '" "' + $uri + '"')
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            $proc = [System.Diagnostics.Process]::Start($psi)
-            $errTask = $proc.StandardError.ReadToEndAsync()
-            $outTask = $proc.StandardOutput.ReadToEndAsync()
-            if (-not $proc.WaitForExit(300000)) {
-                try { $proc.Kill() } catch { }
-                $ultimoErr = 'Tiempo de espera agotado (5 min).'
-                continue
-            }
+        $timedOut = $false
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $edge
+        $psi.Arguments = ($modos[$intento] + ' --disable-gpu --disable-extensions --no-first-run --no-default-browser-check ' +
+                          '--user-data-dir="' + $perfil + '" --no-pdf-header-footer --print-to-pdf-no-header ' +
+                          '--print-to-pdf="' + $PdfPath + '" "' + $uri + '"')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        if (-not $proc.WaitForExit(300000)) {
+            try { $proc.Kill() } catch { }
+            $ultimoErr = 'Tiempo de espera agotado (5 min).'
+            $timedOut = $true
+        } else {
             $errTxt = ''
             try { $errTxt = ('' + $errTask.Result).Trim() } catch { }
             $ultimoErr = ('Codigo de salida ' + $proc.ExitCode)
             if ($errTxt -ne '') { $ultimoErr += '. ' + $errTxt }
-        } finally {
-            try { Remove-Item -LiteralPath $perfil -Recurse -Force -ErrorAction SilentlyContinue } catch { }
         }
-        if ((Test-Path -LiteralPath $PdfPath) -and (Get-Item -LiteralPath $PdfPath).Length -gt 0) { return }
+        # Edge puede delegar la impresion a un proceso hijo y salir de inmediato
+        # (codigo 0): esperar a que el PDF aparezca y termine de escribirse.
+        $esperaMs = 30000
+        if ($timedOut) { $esperaMs = 5000 } elseif ($intento -eq 0) { $esperaMs = 60000 }
+        $ok = Wait-ArchivoPdf -PdfPath $PdfPath -TimeoutMs $esperaMs
+        try { Remove-Item -LiteralPath $perfil -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        if ($ok) { return }
     }
     if ($ultimoErr.Length -gt 500) { $ultimoErr = $ultimoErr.Substring(0, 500) + '...' }
     throw ('Edge no pudo generar el PDF. Detalle: ' + $ultimoErr)
@@ -509,7 +546,6 @@ function New-SvnChangeReport {
 
     $mods = Split-Lista -Valores $Modulos
     $exts = Split-Lista -Valores $Extensiones
-    if ($mods.Count -eq 0) { throw 'Debe indicar al menos un archivo.' }
 
     $rangoExpr = (ConvertTo-RevExpr -Valor $Desde) + ':' + (ConvertTo-RevExpr -Valor $Hasta)
 
@@ -524,10 +560,14 @@ function New-SvnChangeReport {
 
     $modPat = (@($mods | ForEach-Object { [regex]::Escape($_) }) -join '|')
     $extPat = (@($exts | ForEach-Object { [regex]::Escape($_) }) -join '|')
-    if ($exts.Count -gt 0) {
+    if ($mods.Count -gt 0 -and $exts.Count -gt 0) {
         $patron = New-Object System.Text.RegularExpressions.Regex ("/($modPat)\.($extPat)$", 'IgnoreCase')
-    } else {
+    } elseif ($mods.Count -gt 0) {
         $patron = New-Object System.Text.RegularExpressions.Regex ("/($modPat)(\.[A-Za-z0-9]+)?$", 'IgnoreCase')
+    } elseif ($exts.Count -gt 0) {
+        $patron = New-Object System.Text.RegularExpressions.Regex ("\.($extPat)$", 'IgnoreCase')
+    } else {
+        $patron = New-Object System.Text.RegularExpressions.Regex ('.', 'IgnoreCase')  # todos los archivos
     }
     $patronOtraX = New-Object System.Text.RegularExpressions.Regex ("/($modPat)\.([A-Za-z0-9]+)$", 'IgnoreCase')
 
@@ -641,7 +681,9 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     [void]$sb.Append(("<div class='meta'>Rango: <b>{0} &rarr; {1}</b> &nbsp;|&nbsp; Generado: {2} &nbsp;|&nbsp; Herramienta: ReporteCambiosSVN.ps1 (solo requiere svn.exe)</div>$nl" -f (HtmlEnc $Desde), (HtmlEnc $Hasta), $ahora))
     $extsTxt = '(cualquier extensi&oacute;n)'
     if ($exts.Count -gt 0) { $extsTxt = '(.' + (HtmlEnc ($exts -join ' / .')) + ')' }
-    [void]$sb.Append(("<div class='meta'>Filtro de archivos: {0} &nbsp;{1}</div>$nl" -f (HtmlEnc ($mods -join ', ')), $extsTxt))
+    $modsTxt = '(todos los archivos)'
+    if ($mods.Count -gt 0) { $modsTxt = HtmlEnc ($mods -join ', ') }
+    [void]$sb.Append(("<div class='meta'>Filtro de archivos: {0} &nbsp;{1}</div>$nl" -f $modsTxt, $extsTxt))
     [void]$sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>$nl")
 
     [void]$sb.Append(("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>{0} revisiones afectan los archivos listados. Total de cambios por archivo:</p>$nl" -f $matched.Count))
@@ -817,13 +859,30 @@ function Show-ReportGui {
     $ttProj = "URL del repositorio SVN (https://...) o carpeta local de un working copy.`r`nEjemplo: https://servidor/svn/repo/trunk"
     $ttDesde = "Inicio del rango a analizar.`r`nAcepta fecha (YYYY-MM-DD) o numero de revision.`r`nEjemplos: 2025-08-01  |  31490"
     $ttHasta = "Fin del rango a analizar.`r`nAcepta fecha (YYYY-MM-DD), numero de revision o HEAD (ultima revision)."
-    $ttArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).`r`nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP`r`nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio."
+    $ttArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).`r`nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP`r`nVacio = se incluyen TODOS los archivos modificados.`r`nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio."
     $ttExts = "Extensiones a considerar, separadas por coma. Ejemplo: BAS,DAT`r`nVacio = cualquier extension."
     $ttResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):`r`nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.`r`nNo usa IA ni servicios externos: el resultado es determinista."
     $ttSalida = "Ruta del archivo HTML a generar.`r`nVacio = se crea automaticamente en el Escritorio."
     $ttAbrir = "Al terminar, abre el PDF (si se exporto) o el HTML."
     $ttPdf = "Ademas del HTML, genera un PDF en hoja apaisada.`r`nUsa Microsoft Edge incluido en Windows 10/11 en modo oculto.`r`nSi Edge no esta disponible, el HTML se genera igual y se muestra un aviso."
     $ttEstado = 'Requisito: cliente svn.exe en el PATH.'
+
+    if (-not ('RepGui.Native' -as [type])) {
+        Add-Type -Namespace RepGui -Name Native -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);'
+    }
+    $script:phArchivos = 'Vacio = todos los archivos. Ej: SUBTSPAG,USRTTLOG,USRTDUMP'
+    $script:cfgPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'ReporteCambiosSVN\ultima_config.txt'
+
+    function Set-Cue([System.Windows.Forms.TextBox]$t, [string]$texto) {
+        [void][RepGui.Native]::SendMessage($t.Handle, 0x1501, [IntPtr]1, $texto)
+    }
+    function Get-TextoReal([System.Windows.Forms.TextBox]$t) {
+        if ($t.ForeColor -eq [System.Drawing.Color]::Gray) { return '' } else { return $t.Text }
+    }
+    function Set-TextoReal([System.Windows.Forms.TextBox]$t, [string]$valor, [string]$ph) {
+        if (('' + $valor).Trim() -ne '') { $t.ForeColor = [System.Drawing.SystemColors]::WindowText; $t.Text = $valor }
+        else { $t.ForeColor = [System.Drawing.Color]::Gray; $t.Text = $ph }
+    }
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Reporte de cambios SVN por modulo'
@@ -858,6 +917,7 @@ function Show-ReportGui {
     $tips.SetToolTip($lProj, $ttProj)
     $tips.SetToolTip($txtProj, $ttProj)
     $tips.SetToolTip($btnDir, 'Seleccionar la carpeta de un working copy local.')
+    Set-Cue $txtProj 'https://servidor/svn/repo/trunk  o  C:\ruta\workingcopy'
 
     $y += 38
     $lDesde = New-Lbl 'Desde:' 15 $y 280
@@ -876,6 +936,8 @@ function Show-ReportGui {
     $tips.SetToolTip($txtDesde, $ttDesde)
     $tips.SetToolTip($lHasta, $ttHasta)
     $tips.SetToolTip($txtHasta, $ttHasta)
+    Set-Cue $txtDesde 'Fecha YYYY-MM-DD o revision. Ej: 2025-08-01 | 31490'
+    Set-Cue $txtHasta 'Fecha YYYY-MM-DD, revision o HEAD'
 
     $y += 38
     $lArch = New-Lbl 'Archivos a identificar:' 15 $y 500
@@ -887,6 +949,17 @@ function Show-ReportGui {
     $f.Controls.Add($txtMods)
     $tips.SetToolTip($lArch, $ttArchivos)
     $tips.SetToolTip($txtMods, $ttArchivos)
+    $txtMods.Add_GotFocus({
+        if ($txtMods.ForeColor -eq [System.Drawing.Color]::Gray) {
+            $txtMods.Text = ''; $txtMods.ForeColor = [System.Drawing.SystemColors]::WindowText
+        }
+    })
+    $txtMods.Add_LostFocus({
+        if ($txtMods.Text.Trim() -eq '') {
+            $txtMods.ForeColor = [System.Drawing.Color]::Gray; $txtMods.Text = $script:phArchivos
+        }
+    })
+    Set-TextoReal $txtMods '' $script:phArchivos
 
     $y += 75
     $lExts = New-Lbl 'Extensiones:' 15 $y 280
@@ -897,6 +970,7 @@ function Show-ReportGui {
     $f.Controls.Add($txtExts)
     $tips.SetToolTip($lExts, $ttExts)
     $tips.SetToolTip($txtExts, $ttExts)
+    Set-Cue $txtExts 'Vacio = todas. Ej: BAS,DAT'
     $chkResumen = New-Object System.Windows.Forms.CheckBox
     $chkResumen.Text = 'Incluir resumen por archivo'
     $chkResumen.Location = New-Object System.Drawing.Point(320, ($y - 2)); $chkResumen.Size = New-Object System.Drawing.Size(370, 23)
@@ -917,6 +991,7 @@ function Show-ReportGui {
     $tips.SetToolTip($lSalida, $ttSalida)
     $tips.SetToolTip($txtSalida, $ttSalida)
     $tips.SetToolTip($btnSalida, 'Elegir donde guardar el HTML.')
+    Set-Cue $txtSalida 'Vacio = autogenerado en el Escritorio'
 
     $y += 34
     $chkAbrir = New-Object System.Windows.Forms.CheckBox
@@ -969,6 +1044,44 @@ function Show-ReportGui {
     $btnCancel.Add_Click({ $script:guiCancel = $true; $lblEstado.Text = 'Cancelando...' })
     $btnCerrar.Add_Click({ $f.Close() })
 
+    function Save-ConfigGui {
+        try {
+            $dirCfg = Split-Path -Parent $script:cfgPath
+            if (-not (Test-Path -LiteralPath $dirCfg)) { New-Item -ItemType Directory -Path $dirCfg -Force | Out-Null }
+            $lineas = @(
+                ('proyecto=' + $txtProj.Text.Trim()),
+                ('desde=' + $txtDesde.Text.Trim()),
+                ('hasta=' + $txtHasta.Text.Trim()),
+                ('archivos=' + (Get-TextoReal $txtMods).Trim()),
+                ('extensiones=' + $txtExts.Text.Trim()),
+                ('salida=' + $txtSalida.Text.Trim()),
+                ('resumen=' + $(if ($chkResumen.Checked) { '1' } else { '0' })),
+                ('abrir=' + $(if ($chkAbrir.Checked) { '1' } else { '0' })),
+                ('pdf=' + $(if ($chkPdf.Checked) { '1' } else { '0' }))
+            )
+            [System.IO.File]::WriteAllLines($script:cfgPath, $lineas, (New-Object System.Text.UTF8Encoding($true)))
+        } catch { }
+    }
+    function Load-ConfigGui {
+        try {
+            if (-not (Test-Path -LiteralPath $script:cfgPath)) { return }
+            $cfg = @{}
+            foreach ($ln in [System.IO.File]::ReadAllLines($script:cfgPath, [System.Text.Encoding]::UTF8)) {
+                $p = $ln.IndexOf('=')
+                if ($p -gt 0) { $cfg[$ln.Substring(0, $p)] = $ln.Substring($p + 1) }
+            }
+            if ($cfg.ContainsKey('proyecto')) { $txtProj.Text = $cfg['proyecto'] }
+            if ($cfg.ContainsKey('desde')) { $txtDesde.Text = $cfg['desde'] }
+            if ($cfg.ContainsKey('hasta') -and ('' + $cfg['hasta']).Trim() -ne '') { $txtHasta.Text = $cfg['hasta'] }
+            if ($cfg.ContainsKey('archivos')) { Set-TextoReal $txtMods $cfg['archivos'] $script:phArchivos }
+            if ($cfg.ContainsKey('extensiones')) { $txtExts.Text = $cfg['extensiones'] }
+            if ($cfg.ContainsKey('salida')) { $txtSalida.Text = $cfg['salida'] }
+            if ($cfg.ContainsKey('resumen')) { $chkResumen.Checked = ($cfg['resumen'] -ne '0') }
+            if ($cfg.ContainsKey('abrir')) { $chkAbrir.Checked = ($cfg['abrir'] -ne '0') }
+            if ($cfg.ContainsKey('pdf')) { $chkPdf.Checked = ($cfg['pdf'] -eq '1') }
+        } catch { }
+    }
+
     $btnGo.Add_Click({
         $script:guiCancel = $false
         $btnGo.Enabled = $false; $btnCancel.Enabled = $true; $btnCerrar.Enabled = $false
@@ -977,13 +1090,14 @@ function Show-ReportGui {
             if (-not (Test-SvnDisponible)) { throw 'No se encontro svn.exe en el PATH.' }
             if ($txtProj.Text.Trim() -eq '') { throw 'Indique la URL o carpeta del proyecto SVN.' }
             if ($txtDesde.Text.Trim() -eq '') { throw 'Indique el valor "Desde" (fecha o revision).' }
-            if ($txtMods.Text.Trim() -eq '') { throw 'Indique al menos un archivo.' }
+
+            Save-ConfigGui
 
             $res = New-SvnChangeReport `
                 -ProjectPath $txtProj.Text `
                 -Desde $txtDesde.Text.Trim() `
                 -Hasta $txtHasta.Text.Trim() `
-                -Modulos @($txtMods.Text) `
+                -Modulos @((Get-TextoReal $txtMods)) `
                 -Extensiones @($txtExts.Text) `
                 -Salida $txtSalida.Text `
                 -IncluirResumen $chkResumen.Checked `
@@ -1024,6 +1138,8 @@ function Show-ReportGui {
         }
     })
 
+    Load-ConfigGui
+    $f.Add_FormClosing({ Save-ConfigGui })
     [void]$f.ShowDialog()
 }
 
@@ -1046,7 +1162,6 @@ if ($usarGui) {
 # --- Modo CLI ---
 if (('' + $ProjectPath).Trim() -eq '') { throw 'Falta -ProjectPath (URL o carpeta local del proyecto SVN).' }
 if (('' + $Desde).Trim() -eq '')       { throw 'Falta -Desde (fecha YYYY-MM-DD o revision).' }
-if ($null -eq $Archivos -or @($Archivos).Count -eq 0) { throw 'Falta -Archivos (lista separada por coma).' }
 
 $resultado = New-SvnChangeReport `
     -ProjectPath $ProjectPath `

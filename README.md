@@ -9,8 +9,8 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por m�
 - **Resumen por archivo** (100% regex, determinista, sin IA): líneas ±, funciones nuevas/eliminadas, llamadas, temas detectados
 - **Índice general**: revisiones, archivos afectados y archivos sin cambios en el periodo
 - **Exportación a PDF** apaisado usando Microsoft Edge integrado en Windows (headless)
-- **GUI** (WinForms, con descripciones en tooltips al pasar el mouse) y **modo consola** automatizable en el mismo ejecutable
-- Filtro por lista de archivos (separados por coma) y extensiones opcionales (vacío = cualquier extensión)
+- **GUI** (WinForms) con descripciones en tooltips, textos de ayuda en los campos (formato de fecha/revisión) y **memoria de la última configuración** usada (se guarda en `%APPDATA%\ReporteCambiosSVN`)
+- Filtro por lista de archivos y extensiones, ambos **opcionales**: vacíos = todos los archivos modificados / cualquier extensión
 
 ## Requisitos
 
@@ -26,11 +26,11 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por m�
 
 ```bat
 ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev> ^
-    [-Hasta <fecha|rev|HEAD>] -Archivos "ARCH1,ARCH2,ARCH3" [-Extensiones "BAS,DAT"] ^
+    [-Hasta <fecha|rev|HEAD>] [-Archivos "ARCH1,ARCH2"] [-Extensiones "BAS,DAT"] ^
     [-Salida reporte.html] [-SinResumen] [-AbrirAlTerminar] [-Pdf] [-SalidaPdf reporte.pdf]
 ```
 
-Notas: `-Modulos` se acepta como alias de `-Archivos`. `-Extensiones` vacío = cualquier extensión.
+Notas: `-Modulos` se acepta como alias de `-Archivos`. Sin `-Archivos` y/o sin `-Extensiones` se incluyen todos los archivos / cualquier extensión.
 
 Ejemplo:
 
