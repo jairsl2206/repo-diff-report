@@ -1,10 +1,11 @@
 # repo-diff-report
 
-Herramienta portable para Windows que genera reportes HTML/PDF de cambios por módulo desde SVN (Git en el futuro): diffs lado a lado, resumen heurístico por archivo y metadatos de cada revisión. Solo requiere el cliente del VCS.
+Herramienta portable para Windows que genera reportes HTML/PDF de cambios por archivo desde repositorios **SVN y Git**: diffs lado a lado, resumen por archivo y metadatos de cada revisión/commit. Solo requiere el cliente del VCS (`svn.exe` y/o `git.exe`).
 
 ## Características
 
-- **Diffs lado a lado** (antes/después) estilo GitHub, con números de línea y colores, agrupados por revisión y archivo
+- **Soporte SVN y Git** con detección automática: SVN por URL o working copy; Git por carpeta local del clon (o fuerza el tipo con `-Vcs svn|git`)
+- **Diffs lado a lado** (antes/después) estilo GitHub, con números de línea y colores, agrupados por revisión/commit y archivo
 - **Metadatos por revisión**: número, fecha, autor, versión (extraída del mensaje) y descripción del commit
 - **Resumen por archivo** (100% regex, determinista, sin IA): líneas ±, funciones nuevas/eliminadas, llamadas, temas detectados
 - **Índice general**: revisiones, archivos afectados y archivos sin cambios en el periodo
@@ -15,7 +16,7 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por m�
 ## Requisitos
 
 - Windows 8/10/11 (.NET Framework 4.5+, incluido en el sistema)
-- `svn.exe` en el `PATH` (cliente SVN de línea de comandos)
+- `svn.exe` en el `PATH` para repos SVN, `git.exe` para repos Git
 - Para PDF: Microsoft Edge (incluido en Windows 10/11)
 
 ## Uso
@@ -27,10 +28,11 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por m�
 ```bat
 ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev> ^
     [-Hasta <fecha|rev|HEAD>] [-Archivos "ARCH1,ARCH2"] [-Extensiones "BAS,DAT"] ^
-    [-Salida reporte.html] [-SinResumen] [-AbrirAlTerminar] [-Pdf] [-SalidaPdf reporte.pdf]
+    [-Salida reporte.html] [-SinResumen] [-AbrirAlTerminar] [-Pdf] [-SalidaPdf reporte.pdf] ^
+    [-Autor "Nombre"] [-Vcs auto|svn|git]
 ```
 
-Notas: `-Modulos` se acepta como alias de `-Archivos`. Sin `-Archivos` y/o sin `-Extensiones` se incluyen todos los archivos / cualquier extensión.
+Notas: `-Modulos` se acepta como alias de `-Archivos`. Sin `-Archivos` y/o sin `-Extensiones` se incluyen todos los archivos / cualquier extensión. En Git el rango de commits es `desde..hasta` (exclusivo del commit inicial); las fechas funcionan igual que en SVN.
 
 Ejemplo:
 
@@ -47,4 +49,4 @@ También se incluye la variante en PowerShell puro (`ReporteCambiosSVN.ps1` + la
 
 ## Roadmap
 
-- Soporte para repositorios **Git** (`git log` / `git diff`) con el mismo motor de reporte
+- [x] Soporte para repositorios **Git** (`git log` / `git diff`) con el mismo motor de reporte (v1.2.0)

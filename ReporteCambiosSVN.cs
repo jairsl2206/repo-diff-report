@@ -10,10 +10,13 @@
 //  Uso:
 //    ReporteCambiosSVN.exe                     -> interfaz grafica
 //    ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev>
-//        [-Hasta <fecha|rev|HEAD>] -Archivos "A,B,C" [-Extensiones "BAS,DAT"]
+//        [-Hasta <fecha|rev|HEAD>] [-Archivos "A,B,C"] [-Extensiones "BAS,DAT"]
 //        [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]
-//        [-Pdf] [-SalidaPdf archivo.pdf]
+//        [-Pdf] [-SalidaPdf archivo.pdf] [-Autor "Nombre"] [-Vcs auto|svn|git]
 //    (-Modulos se acepta como alias de -Archivos por compatibilidad)
+//
+//  Soporta repositorios SVN (URL o working copy) y Git (carpeta local del clon),
+//  con deteccion automatica del tipo de repositorio.
 //
 //  La exportacion a PDF usa Microsoft Edge (incluido en Windows 10/11) en
 //  modo headless; si no esta disponible, el HTML se genera igual y se avisa.
@@ -37,11 +40,11 @@ using System.Xml;
 
 [assembly: AssemblyTitle("ReporteCambiosSVN")]
 [assembly: AssemblyProduct("ReporteCambiosSVN")]
-[assembly: AssemblyDescription("Reporte HTML/PDF de cambios SVN por archivo (diffs lado a lado). Autor: Jair Salda\u00f1a. Solo requiere svn.exe")]
+[assembly: AssemblyDescription("Reporte HTML/PDF de cambios SVN/Git por archivo (diffs lado a lado). Autor: Jair Salda\u00f1a. Requiere svn.exe y/o git.exe")]
 [assembly: AssemblyCompany("Napse Global \u00b7 TOTVS")]
 [assembly: AssemblyCopyright("\u00a9 2026 Jair Salda\u00f1a \u00b7 Napse Global \u2014 Napse ahora es TOTVS")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 namespace ReporteCambiosSvn
 {
@@ -53,12 +56,12 @@ namespace ReporteCambiosSvn
         public string StdErr;
     }
 
-    internal static class Svn
+    internal static class Proc
     {
-        public static SvnResult RunRaw(IEnumerable<string> args)
+        public static SvnResult Run(string exe, IEnumerable<string> args)
         {
             var psi = new ProcessStartInfo();
-            psi.FileName = "svn";
+            psi.FileName = exe;
             var sb = new StringBuilder();
             foreach (var a in args)
             {
@@ -82,6 +85,14 @@ namespace ReporteCambiosSvn
                 return new SvnResult { ExitCode = p.ExitCode, Bytes = ms.ToArray(), StdErr = errTask.Result };
             }
         }
+    }
+
+    internal static class Svn
+    {
+        public static SvnResult RunRaw(IEnumerable<string> args)
+        {
+            return Proc.Run("svn", args);
+        }
 
         public static bool Disponible()
         {
@@ -89,6 +100,22 @@ namespace ReporteCambiosSvn
             catch { return false; }
         }
     }
+
+    internal static class Git
+    {
+        public static SvnResult Run(IEnumerable<string> args)
+        {
+            return Proc.Run("git", args);
+        }
+
+        public static bool Disponible()
+        {
+            try { Run(new[] { "--version" }); return true; }
+            catch { return false; }
+        }
+    }
+
+    internal enum VcsKind { Svn, Git }
 
     // ----------------------------------------------------------------- TEXTO
     internal static class Texto
@@ -139,7 +166,7 @@ namespace ReporteCambiosSvn
 
     internal class LogEntry
     {
-        public string Rev = "", Author = "", Date = "", Msg = "";
+        public string Rev = "", FullRev = "", Author = "", Date = "", Msg = "";
         public List<PathItem> Targets = new List<PathItem>();
         public List<PathItem> Others = new List<PathItem>();
     }
@@ -158,6 +185,8 @@ namespace ReporteCambiosSvn
     internal class ReportOptions
     {
         public string ProjectPath = "", Desde = "", Hasta = "HEAD", Salida = "";
+        public string Autor = "";
+        public string Vcs = "auto";
         public List<string> Modulos = new List<string>();
         public List<string> Extensiones = new List<string>();
         public bool IncluirResumen = true;
@@ -318,22 +347,38 @@ namespace ReporteCambiosSvn
             if (progress == null) progress = delegate { };
             if (cancelado == null) cancelado = () => false;
 
-            if (!Svn.Disponible())
-                throw new InvalidOperationException("No se encontro svn.exe en el PATH. Instale un cliente SVN de linea de comandos.");
-
             var mods = new List<string>(opt.Modulos);
             var exts = new List<string>(opt.Extensiones);
 
-            string rango = RevExpr(opt.Desde) + ":" + RevExpr(opt.Hasta);
-
             string objetivo = (opt.ProjectPath ?? "").Trim();
-            if (objetivo.Length == 0) throw new ArgumentException("Debe indicar la URL o ruta del proyecto SVN.");
+            if (objetivo.Length == 0) throw new ArgumentException("Debe indicar la URL o ruta del proyecto (SVN o Git).");
             if (!Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://") && Directory.Exists(objetivo))
                 objetivo = System.IO.Path.GetFullPath(objetivo);
 
-            progress(0, 1, "Consultando informacion del repositorio...");
-            string url, root;
-            InfoXml(objetivo, out url, out root);
+            VcsKind kind = DetectarVcs(objetivo, opt.Vcs);
+            string url = "", root = "", dirGit = "";
+            if (kind == VcsKind.Svn)
+            {
+                if (!Svn.Disponible())
+                    throw new InvalidOperationException("No se encontro svn.exe en el PATH. Instale un cliente SVN de linea de comandos.");
+                progress(0, 1, "Consultando informacion del repositorio (SVN)...");
+                InfoXml(objetivo, out url, out root);
+            }
+            else
+            {
+                if (Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://"))
+                    throw new ArgumentException("Para repositorios Git indique la carpeta local del clon (no una URL).");
+                if (!Git.Disponible())
+                    throw new InvalidOperationException("No se encontro git.exe en el PATH. Instale Git para Windows.");
+                progress(0, 1, "Consultando informacion del repositorio (Git)...");
+                var rt = Git.Run(new[] { "-C", objetivo, "rev-parse", "--show-toplevel" });
+                if (rt.ExitCode != 0)
+                    throw new InvalidOperationException("La carpeta no es un repositorio Git valido:\r\n" + rt.StdErr);
+                dirGit = Texto.DecodeBytes(rt.Bytes).Trim();
+                var rr = Git.Run(new[] { "-C", objetivo, "config", "--get", "remote.origin.url" });
+                string remoto = rr.ExitCode == 0 ? Texto.DecodeBytes(rr.Bytes).Trim() : "";
+                url = remoto.Length > 0 ? remoto : dirGit.Replace('\\', '/');
+            }
 
             string modPat = string.Join("|", mods.Select(Regex.Escape));
             string extPat = string.Join("|", exts.Select(Regex.Escape));
@@ -348,8 +393,19 @@ namespace ReporteCambiosSvn
                 patron = new Regex(".", RegexOptions.IgnoreCase); // todos los archivos
             var patronOtraX = new Regex("/(" + modPat + ")\\.([A-Za-z0-9]+)$", RegexOptions.IgnoreCase);
 
-            progress(0, 1, "Consultando log SVN...");
-            var entradas = LogEntries(url, rango, patron);
+            string vcsNombre = kind == VcsKind.Git ? "Git" : "SVN";
+            string prefRev = kind == VcsKind.Git ? "" : "r";
+            progress(0, 1, "Consultando log " + vcsNombre + "...");
+            List<LogEntry> entradas;
+            if (kind == VcsKind.Git)
+            {
+                entradas = GitLogEntries(dirGit, opt.Desde, opt.Hasta, patron);
+            }
+            else
+            {
+                string rango = RevExpr(opt.Desde) + ":" + RevExpr(opt.Hasta);
+                entradas = LogEntries(url, rango, patron);
+            }
             var matched = entradas.Where(e => e.Targets.Count > 0).ToList();
 
             var parsedPorRev = new Dictionary<string, List<KeyValuePair<string, FileDiff>>>();
@@ -360,9 +416,11 @@ namespace ReporteCambiosSvn
             {
                 idx++;
                 if (cancelado()) throw new OperationCanceledException("Operacion cancelada por el usuario.");
-                progress(idx, matched.Count, "Descargando diff r" + e.Rev + "  (" + idx + "/" + matched.Count + ")");
+                progress(idx, matched.Count, "Descargando diff " + prefRev + e.Rev + "  (" + idx + "/" + matched.Count + ")");
 
-                string texto = DiffRevision(root, e.Rev, e.Targets);
+                string texto = kind == VcsKind.Git
+                    ? GitDiffCommit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev, e.Targets)
+                    : DiffRevision(root, e.Rev, e.Targets);
                 string errRev = null;
                 Dictionary<string, List<string>> secciones;
                 if (texto.StartsWith("@@ERROR@@"))
@@ -372,7 +430,7 @@ namespace ReporteCambiosSvn
                 }
                 else
                 {
-                    secciones = SplitSecciones(texto);
+                    secciones = kind == VcsKind.Git ? SplitSeccionesGit(texto) : SplitSecciones(texto);
                 }
 
                 var archivos = new List<KeyValuePair<string, FileDiff>>();
@@ -416,7 +474,7 @@ namespace ReporteCambiosSvn
 
             progress(matched.Count, Math.Max(1, matched.Count), "Generando documento HTML...");
 
-            string html = BuildHtml(opt, url, mods, exts, entradas, matched, parsedPorRev, modCount, patronOtraX);
+            string html = BuildHtml(opt, kind, url, mods, exts, entradas, matched, parsedPorRev, modCount, patronOtraX);
 
             string salida = (opt.Salida ?? "").Trim();
             if (salida.Length == 0)
@@ -470,6 +528,142 @@ namespace ReporteCambiosSvn
             throw new ArgumentException("Valor de fecha/revision no valido: \"" + v + "\". Use YYYY-MM-DD, un numero de revision o HEAD.");
         }
 
+        private static bool EsFecha(string v)
+        {
+            return Regex.IsMatch((v ?? "").Trim(), "^\\d{4}-\\d{2}-\\d{2}([ T]\\d{2}:\\d{2}(:\\d{2})?)?$");
+        }
+
+        public static VcsKind DetectarVcs(string objetivo, string vcsOpt)
+        {
+            string v = (vcsOpt ?? "auto").Trim().ToLowerInvariant();
+            if (v == "svn") return VcsKind.Svn;
+            if (v == "git") return VcsKind.Git;
+            if (Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://")) return VcsKind.Svn;
+            if (Directory.Exists(objetivo))
+            {
+                if (Directory.Exists(System.IO.Path.Combine(objetivo, ".svn"))) return VcsKind.Svn;
+                if (Git.Disponible())
+                {
+                    var r = Git.Run(new[] { "-C", objetivo, "rev-parse", "--is-inside-work-tree" });
+                    if (r.ExitCode == 0) return VcsKind.Git;
+                }
+            }
+            return VcsKind.Svn;
+        }
+
+        // ------------------------------------------------------------- GIT
+        private static List<LogEntry> GitLogEntries(string dir, string desde, string hasta, Regex patron)
+        {
+            var args = new List<string> { "-c", "core.quotepath=off", "-C", dir, "log", "--reverse", "--no-color",
+                "--date=iso-strict", "--name-status",
+                "--pretty=format:%x1e%h%x1f%H%x1f%an%x1f%ad%x1f%B%x1f" };
+            string d = (desde ?? "").Trim();
+            string h = (hasta ?? "").Trim();
+            string rangoRev = null;
+            if (d.Length > 0 && !EsFecha(d))
+            {
+                string fin = (h.Length > 0 && !EsFecha(h)) ? h : "HEAD";
+                rangoRev = d + ".." + fin;
+            }
+            else if (d.Length > 0)
+            {
+                args.Add("--since=" + d);
+            }
+            if (EsFecha(h)) args.Add("--until=" + h);
+            else if (rangoRev == null && h.Length > 0 && !h.Equals("HEAD", StringComparison.OrdinalIgnoreCase)) rangoRev = h;
+            if (rangoRev != null) args.Add(rangoRev);
+
+            var r = Git.Run(args);
+            if (r.ExitCode != 0)
+                throw new InvalidOperationException("git log fallo:\r\n" + r.StdErr);
+            string texto = Texto.DecodeBytes(r.Bytes);
+
+            var lista = new List<LogEntry>();
+            foreach (var rec in texto.Split('\x1e'))
+            {
+                if (rec.Trim().Length == 0) continue;
+                var partes = rec.Split(new[] { '\x1f' }, 6);
+                if (partes.Length < 6) continue;
+                var e = new LogEntry();
+                e.Rev = partes[0].Trim();
+                e.FullRev = partes[1].Trim();
+                e.Author = partes[2].Trim();
+                string dt = partes[3].Trim();
+                try
+                {
+                    e.Date = DateTime.Parse(dt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
+                                     .ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+                }
+                catch { e.Date = dt; }
+                e.Msg = partes[4].Trim();
+                foreach (var ln in Regex.Split(partes[5], "\r?\n"))
+                {
+                    var t = ln.Trim();
+                    if (t.Length == 0) continue;
+                    var cols = t.Split('\t');
+                    if (cols.Length < 2) continue;
+                    string st = cols[0].Trim();
+                    if (st.Length == 0) continue;
+                    string acc = st.Substring(0, 1).ToUpperInvariant();
+                    if ("MADRC".IndexOf(acc, StringComparison.Ordinal) < 0) continue;
+                    string ruta = cols[cols.Length - 1].Trim();
+                    var item = new PathItem { Action = acc, Path = "/" + ruta.Replace('\\', '/') };
+                    if (patron.IsMatch(item.Path)) e.Targets.Add(item);
+                    else e.Others.Add(item);
+                }
+                lista.Add(e);
+            }
+            return lista;
+        }
+
+        private static string GitDiffCommit(string dir, string fullRev, List<PathItem> targets)
+        {
+            var rutas = targets.Where(t => t.Action != "D").Select(t => t.Path.TrimStart('/')).ToList();
+            if (rutas.Count == 0) return "";
+            var args = new List<string> { "-c", "core.quotepath=off", "-C", dir, "diff", "--no-color", "--unified=3",
+                fullRev + "^", fullRev, "--" };
+            args.AddRange(rutas);
+            var r = Git.Run(args);
+            if (r.ExitCode != 0)
+            {
+                var args2 = new List<string> { "-c", "core.quotepath=off", "-C", dir, "show", "--no-color", "--unified=3",
+                    "--format=", fullRev, "--" };
+                args2.AddRange(rutas);
+                r = Git.Run(args2);
+                if (r.ExitCode != 0 && r.Bytes.Length == 0)
+                    return "@@ERROR@@" + r.StdErr;
+            }
+            return Texto.DecodeBytes(r.Bytes);
+        }
+
+        private static readonly Regex ReGitDiffHdr = new Regex("^diff --git a/(.+) b/(.+)$");
+
+        private static Dictionary<string, List<string>> SplitSeccionesGit(string diffTexto)
+        {
+            var secciones = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            string actual = null;
+            List<string> buf = null;
+            foreach (var linea in Regex.Split(diffTexto, "\r?\n"))
+            {
+                var m = ReGitDiffHdr.Match(linea);
+                if (m.Success)
+                {
+                    if (actual != null) secciones[actual] = buf;
+                    actual = BaseName(m.Groups[2].Value.Trim());
+                    buf = new List<string>();
+                }
+                else if (actual != null)
+                {
+                    if (linea.StartsWith("Binary files ") || linea.StartsWith("GIT binary patch"))
+                        buf.Add("Cannot display: archivo binario.");
+                    else
+                        buf.Add(linea);
+                }
+            }
+            if (actual != null) secciones[actual] = buf;
+            return secciones;
+        }
+
         private static string BaseName(string path)
         {
             var partes = path.Split('/', '\\');
@@ -507,6 +701,7 @@ namespace ReporteCambiosSvn
                 var e = new LogEntry();
                 var attr = le.Attributes != null ? le.Attributes["revision"] : null;
                 e.Rev = attr != null ? attr.Value : "";
+                e.FullRev = e.Rev;
                 var nAut = le.SelectSingleNode("author");
                 e.Author = nAut != null ? nAut.InnerText.Trim() : "";
                 var nMsg = le.SelectSingleNode("msg");
@@ -749,6 +944,36 @@ namespace ReporteCambiosSvn
         }
 
         // ------------------------------------------------------------- HTML
+        private const string LogoB64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAF4AAABgCAYAAACUosWzAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAACxIAAAsSAdLdfvwAAAlhSURB" +
+            "VHhe7Z1pjF5VGcd/722ndOpAS5kybHYLUK20DbhgpbVxZ0cTDZsWCFhECCr94JIoJMZW0UZZglErEcMeFSiaWBUqJAQDSqAFWiylWlu6UDp1pkBnOu87fnne" +
+            "ePt47nLOPXeb8Zf8P/T03vOc+9wz557lOedtUD0awETgJGAOMAuYARwLTAEmAZ1AB9AEBoB+YA+wHdgCbALWA8/Kvw9oI2XT0AklMRFYCHwC+DBwIjBWX+TI" +
+            "HuBJ4BHgD8AGeWGjli7gfOBhYD8wXIBawGZgOTBPF2ik8w7gZmCvwTFFqgU8B3weeJsu5EihAbwfWCUPrJ1QtnYDNwCTdcHrzDzgtxV1uFYfcD1wmH6IOtEN" +
+            "/AQYMjxg1bUDWAwE+qGqzoXAa4YHqpselx5W5ekGHjA8QJ31JnBNlWv/ImCboeAjRauAI/RDl0kD+LKMDnVhR5o2AydrB5RBB/BTQwFHst4APqkdUSSd0k3U" +
+            "BRsNGgKWaIcUQRfwqKFAo0lN4CvaMXnSKRNOuiBZ1F/T/n4LuE47KA865OuuC5BFW4FDpSv6EWApcAewrsDJsyxqAVdoR/mkAdxmMJxVN2hDITqBBfIy7pe5" +
+            "dX1/FXQAOF0X3hdfNBj0oVO0oQTeLiPj24C1FerG7gXeqQublfnAoMFYVu0DDtHGLJkMnAl8D/iLjDS1naK0QZpNLxwO/NNgxIc2amMe6JKVrBuBp4C3DHbz" +
+            "1L26QK7cacjcl9ZoYznQBZwF/EiapqahHL61WBfClnMNmfrU/dpgAXQDFwEr5S85j3WCXuAYbTgthwL/MmTqUyu10RKYBVwNPCgL47qMrvq1NpSW5YbMfOsW" +
+            "bbRkxgGnAcuAv2XsULTkW2PF9IIGL9/XhivGZOCzwF3Aq4byJ+l5YIzONI6fGzLJQzdqwxUmkDHHcssm6XKdURQzM/6J2ajqNT6KHuBpw/OYtNkUnGVazloq" +
+            "czJFYLJfB3YCn5IBYBLTgc/pRM1kmejXby0v3aoLUDNuMjyTSWt1uKSucYuBCSotinXAVTI4ORO4GPiqfB+ekqF7ElmnC8rmQZ0QwRzggzqxTQN40fC2ojRX" +
+            "Z6AYC7xHFgtWRYTs3aVvqhndFiPhyGd9t+HiKO2XobgN4yQieAXwdynwQ/qimtGQ6DPtH5P6oybQvmu4OEpb9M2WNOTP7zrg1KgC1YSNBv9E6WJ9cwC8Yrgw" +
+            "So/pDByZL/kNygfox8Blsinhf7pgFeWvBv9E6QF98yzLyaJf6gwcOcWQd1v9wGpZofp4hf8q1hjKHqVe3VW/ynBRnJaHb87Auwx5R2kIeEa6cJ8BjtZdtJL4" +
+            "naGscVpIqDv5oYPzSuRVneDIfp0QwxiJ4rpWppO3ykf6VgkwOlzfUBA2z4As6IM8kO0E0AUH5+XMcYa8XTUI/FlezDRtKEfuNpQlTqvbNx5l2b4PAx892LYz" +
+            "RzrYTqMW8ISEXdh2e235hcF+nHYCjUC6dbZt5V6d4MiQOMk3DeADwM9kMec7OTZFtjsIjwR6AmC2/p8U9OkER5o5OT7MJOAbwEvAefo/PWDreIC5AXC8Tk1g" +
+            "OOU8TBryqvEmpgC/kS2ePhnSCSk4IQCm6tQU2H7JoyjS8UgvboXnwZlLjZ8aOK6GD+oER4poajTHSG+qTI4OZIbNhmHHt2yiDMc3PDvetmMC0B3IOQK2+HL8" +
+            "sER6FU2PTsiAXtNIw8TAcTu5y1uOogzHT9IJGXBx/ITA8UPzf8f/FxfHd7jc1HB8WVGU4XifM51OgQGB4yE643RCBnyNCWzwOY3g4osDgeODuxiLoowa79Px" +
+            "LjX+jQD4t05NoCFbZHyxUycUgE/Hu1TCvkDOarElbQhIGv6oEwrAp+PH64QUvBY4Lmr4/DjdJwsaReLT8S6VcHsgwfm2uAy6otgPnCMrSkXhMnaJwiWvLQHw" +
+            "sk5Ngc9+MFLj5wE/lPnzvHGppVG4OH5jIOcz2pLH2V17JM5mmiyCL5VlMpdeVxI+He9yjNY6HJf+vqlzypFOWWr8gcd9rT6bNdsg3x3tkf8YhwN+btLWC6QH" +
+            "uEQWmW0X6dva5TjU13Q4nMHw+3AG9xouiNPd4ZtLZIwEz35dAovSbi7u9TTtcZhF0Gpb14cz+ILhgjj9KXxzhZgAnC2b2jYYyt2Wjx3lODbTC8IZnGiZwQvh" +
+            "myvMdOBK2fq4O1T+AU+j75kG38Rpj55iCOQEan1hlHZ7nhougg7gfRKL+YSncI95Bt/Eybj31WZfq0t8fNV4WaJ3r5ZTN1w+tosMvonThToDEiJ3tVqe1y3L" +
+            "4B/qebYBt0uPaYa+OAKbYN++qMpquxXnNJ1BzVhveKawtklvb6mcaX+U9ISCUABt+OUl6U5dgDDXGm6IUuIWwopjU8na2ie/ymCzwbityM1nyAdnn+Emk+KO" +
+            "tKoDSTXep55L0xm5xXCjSQMSDOp7wqwobHpxWXWJNm5ihuWW+r3yAo7VGVWcXYZnyUOv2IySVxoySNKgBIWe67gqUySBRZOaVZdp43FMy3iW1+uyRWaR45pk" +
+            "3nRJU6nL7VtrbY9NAfi2ISMX7ZZtlGd4ngfPQo/lFImLmsDHtOE0dOVwwOab0hwtcQwP98VcQ9l861faqA3n5FwznpflvrM9r+MmcZ6hLD71umwHzcQdhozz" +
+            "0IAc2LlMzvLyMYkVxdcM9n2pJcdpZWainDKkDeStAdlQvEIO5TkuzSAkJfcZ7PlS7NSALacW1AuIU0vWSu+RqY35UZNOCbjs602r9Y5RB7HYrlIVoaYMx2+X" +
+            "l7FQRtJxU7y2c+hp1StnQninIX1zbbBqakpszmqJTFgi44mp0p292XBPVg3IQRe5MVa6g9pwXfSWQ1RAkprApdpReXCIBJrqAoxGtaSJK4wJOfxOSN3UBL6k" +
+            "HVMEnXKmmC7QaNBg3r8LksRY+cmIPEe3VVOfjOgrwTUV6OcXoU1y2kmlWCADHF3YkaKHqrzadoQE7YykpmefxN74mq7IlfNlNV4/RN30qMOxMqUzSRZAbNZv" +
+            "q6KtcjhnLWp5FLOlfaxD89MLfKtCK2VeeK+8ANt48iK0S+LWK/vx9MEJsqOk7B9Tb8qvHlw+0mp4EuOBT8sZ7GlPpM6qlsyZL8vjd/lsqMrHY7wEhp4uc+qz" +
+            "PYaF7JAfElgDPBw6vLpUquJ4TaeEjc+RxYWZcpbYFGmHO2W6oiUj5n4JJN0ukRGbpGY/HRrUVYr/AJVhOL78Kt9fAAAAAElFTkSuQmCC";
+
         private const string Css = @"
 body{font-family:'Segoe UI',Arial,sans-serif;margin:0;background:#f0f2f5;color:#1f2328}
 .wrap{max-width:1500px;margin:0 auto;padding:18px}
@@ -756,6 +981,8 @@ h1{font-size:22px;margin:8px 0}
 h2{font-size:17px;margin:0}
 .meta{color:#57606a;font-size:12px}
 .cover{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px 22px;margin:14px 0}
+.coverrow{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}
+.coverlogo{width:84px;height:84px;object-fit:contain;flex:0 0 auto}
 .cover .brand{font-size:11px;letter-spacing:3px;color:#57606a;text-transform:uppercase;font-weight:700}
 .cover h1{margin:6px 0 2px 0;font-size:24px}
 .cover .sub{color:#57606a;font-size:13px;margin-bottom:10px}
@@ -792,9 +1019,12 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 @page{size:landscape;margin:10mm}
 @media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 ";
-        private const string Js = "function setAll(open){document.querySelectorAll(\"details.file\").forEach(function(d){d.open=open;});}";
+        private const string Js =
+            "function setAll(open){document.querySelectorAll(\"details.file\").forEach(function(d){d.open=open;});}" +
+            "window.addEventListener(\"beforeprint\",function(){document.querySelectorAll(\"details\").forEach(function(d){d.setAttribute(\"data-wasopen\",d.open?\"1\":\"0\");d.open=true;});});" +
+            "window.addEventListener(\"afterprint\",function(){document.querySelectorAll(\"details\").forEach(function(d){if(d.getAttribute(\"data-wasopen\")===\"0\"){d.open=false;}d.removeAttribute(\"data-wasopen\");});});";
 
-        private static string BuildHtml(ReportOptions opt, string url, List<string> mods, List<string> exts,
+        private static string BuildHtml(ReportOptions opt, VcsKind kind, string url, List<string> mods, List<string> exts,
             List<LogEntry> entradas, List<LogEntry> matched,
             Dictionary<string, List<KeyValuePair<string, FileDiff>>> parsedPorRev,
             Dictionary<string, int> modCount, Regex patronOtraX)
@@ -802,24 +1032,30 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             var sb = new StringBuilder(4 * 1024 * 1024);
             string nl = "\n";
             string ahora = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+            string vcsNombre = kind == VcsKind.Git ? "Git" : "SVN";
+            string prefRev = kind == VcsKind.Git ? "" : "r";
+            string colRev = kind == VcsKind.Git ? "Commit" : "Revisi&oacute;n";
 
             sb.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'>" + nl);
             sb.Append("<title>Reporte de cambios por archivo - Napse Global \u00b7 TOTVS</title>" + nl);
             sb.Append("<style>" + Css + "</style><script>" + Js + "</script></head><body><div class='wrap'>" + nl);
             string extsTxt = exts.Count > 0 ? "(." + Texto.E(string.Join(" / .", exts)) + ")" : "(cualquier extensi&oacute;n)";
             string modsTxt = mods.Count > 0 ? Texto.E(string.Join(", ", mods)) : "(todos los archivos)";
-            sb.Append("<div class='cover'>" + nl);
+            sb.Append("<div class='cover'><div class='coverrow'><div>" + nl);
             sb.Append("<div class='brand'>Napse Global &middot; TOTVS</div>" + nl);
             sb.Append("<h1>Reporte de cambios por archivo</h1>" + nl);
-            sb.Append("<div class='sub'>Control de cambios sobre repositorio SVN</div>" + nl);
+            sb.Append("<div class='sub'>Control de cambios sobre repositorio " + vcsNombre + "</div>" + nl);
             sb.Append("<table class='info'>" + nl);
             sb.Append("<tr><td>Repositorio</td><td>" + Texto.E(url) + "</td></tr>" + nl);
             sb.Append("<tr><td>Rango analizado</td><td>" + Texto.E(opt.Desde) + " &rarr; " + Texto.E(opt.Hasta) + "</td></tr>" + nl);
             sb.Append("<tr><td>Filtro de archivos</td><td>" + modsTxt + " &nbsp;" + extsTxt + "</td></tr>" + nl);
             sb.Append("<tr><td>Fecha de generaci&oacute;n</td><td>" + ahora + "</td></tr>" + nl);
-            sb.Append("<tr><td>Autor</td><td>Jair Salda&ntilde;a</td></tr>" + nl);
+            string autorTxt = (opt.Autor ?? "").Trim().Length > 0 ? Texto.E(opt.Autor.Trim()) : "&mdash;";
+            sb.Append("<tr><td>Autor</td><td>" + autorTxt + "</td></tr>" + nl);
             sb.Append("<tr><td>Compa&ntilde;&iacute;a</td><td>Napse Global</td></tr>" + nl);
             sb.Append("</table></div>" + nl);
+            sb.Append("<img class='coverlogo' src='data:image/png;base64," + LogoB64 + "' alt='TOTVS'>" + nl);
+            sb.Append("</div></div>" + nl);
             sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>" + nl);
 
             sb.Append("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>" + matched.Count +
@@ -863,7 +1099,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             }
 
             sb.Append("<h2>&Iacute;ndice de revisiones</h2>" + nl);
-            sb.Append("<table class='toc'><tr><th style='width:70px'>Revisi&oacute;n</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
+            sb.Append("<table class='toc'><tr><th style='width:80px'>" + colRev + "</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
             foreach (var e in matched)
             {
                 var vs = VersionesDeMensaje(e.Msg);
@@ -871,7 +1107,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 string modsRev = string.Join(", ", e.Targets.Select(t => BaseName(t.Path))
                     .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
                 string fecha10 = e.Date.Length >= 10 ? e.Date.Substring(0, 10) : e.Date;
-                sb.Append("<tr><td><a href='#r" + e.Rev + "'>r" + e.Rev + "</a></td><td>" + fecha10 + "</td><td>" + vsTxt +
+                sb.Append("<tr><td><a href='#r" + e.Rev + "'>" + prefRev + e.Rev + "</a></td><td>" + fecha10 + "</td><td>" + vsTxt +
                           "</td><td>" + Texto.E(e.Author) + "</td><td>" + Texto.E(modsRev) + "</td><td>" +
                           Texto.E(DescCorta(e.Msg, 110)) + "</td></tr>" + nl);
             }
@@ -881,7 +1117,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             {
                 var vs = VersionesDeMensaje(e.Msg);
                 sb.Append("<div class='card' id='r" + e.Rev + "'><div class='hd'>" + nl);
-                sb.Append("<span class='badge'>r" + e.Rev + "</span>" + nl);
+                sb.Append("<span class='badge'>" + prefRev + e.Rev + "</span>" + nl);
                 foreach (var v in vs) sb.Append("<span class='badge ver'>v" + Texto.E(v) + "</span>" + nl);
                 sb.Append("<span class='badge aut'>" + Texto.E(e.Author) + "</span>" + nl);
                 sb.Append("<h2>" + Texto.E(e.Date) + "</h2></div>" + nl);
@@ -956,7 +1192,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 sb.Append("</div>" + nl);
             }
 
-            sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.exe (svn log --xml + svn diff -c REV). Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>" + nl);
+            string cmdTxt = kind == VcsKind.Git
+                ? "git log --name-status + git diff commit^..commit"
+                : "svn log --xml + svn diff -c REV";
+            sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.exe (" + cmdTxt + "). Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>" + nl);
             sb.Append("<p class='small'>Autor: Jair Salda&ntilde;a &middot; Napse Global &mdash; <b>Napse ahora es TOTVS</b>.</p>" + nl);
             sb.Append("</div></body></html>");
             return sb.ToString();
@@ -966,18 +1205,19 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     // ------------------------------------------------------------------ GUI
     internal class MainForm : Form
     {
-        private const string TtProj = "URL del repositorio SVN (https://...) o carpeta local de un working copy.\r\nEjemplo: https://servidor/svn/repo/trunk";
-        private const string TtDesde = "Inicio del rango a analizar.\r\nAcepta fecha (YYYY-MM-DD) o numero de revision.\r\nEjemplos: 2025-08-01  |  31490";
-        private const string TtHasta = "Fin del rango a analizar.\r\nAcepta fecha (YYYY-MM-DD), numero de revision o HEAD (ultima revision).";
+        private const string TtProj = "URL del repositorio SVN (https://...), carpeta de un working copy SVN\r\no carpeta local de un repositorio Git (clonado). Se detecta automaticamente.\r\nEjemplo: https://servidor/svn/repo/trunk  |  C:\\repos\\mi-proyecto";
+        private const string TtDesde = "Inicio del rango a analizar.\r\nSVN: fecha (YYYY-MM-DD) o numero de revision.\r\nGit: fecha o commit/tag (el commit inicial no se incluye: rango desde..hasta).\r\nEjemplos: 2025-08-01  |  31490  |  1f95ed4";
+        private const string TtHasta = "Fin del rango a analizar.\r\nSVN: fecha, numero de revision o HEAD.\r\nGit: fecha, commit/tag o HEAD.";
         private const string TtArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).\r\nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP\r\nVacio = se incluyen TODOS los archivos modificados.\r\nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio.";
         private const string TtExts = "Extensiones a considerar, separadas por coma. Ejemplo: BAS,DAT\r\nVacio = cualquier extension.";
         private const string TtResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):\r\nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.\r\nNo usa IA ni servicios externos: el resultado es determinista.";
         private const string TtSalida = "Ruta del archivo HTML a generar.\r\nVacio = se crea automaticamente en el Escritorio.";
+        private const string TtAutor = "Nombre que aparecera como Autor en la portada del reporte.\r\nSe recuerda para la proxima ejecucion.";
         private const string TtAbrir = "Al terminar, abre el PDF (si se exporto) o el HTML.";
         private const string TtPdf = "Ademas del HTML, genera un PDF en hoja apaisada.\r\nUsa Microsoft Edge incluido en Windows 10/11 en modo oculto.\r\nSi Edge no esta disponible, el HTML se genera igual y se muestra un aviso.";
-        private const string TtEstado = "Requisito: cliente svn.exe en el PATH.";
+        private const string TtEstado = "Requisito: svn.exe (repos SVN) y/o git.exe (repos Git) en el PATH.";
 
-        private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida;
+        private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor;
         private CheckBox chkResumen, chkAbrir, chkPdf;
         private ProgressBar pb;
         private Label lblEstado;
@@ -1043,6 +1283,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                     "archivos=" + TextoReal(txtMods).Trim(),
                     "extensiones=" + txtExts.Text.Trim(),
                     "salida=" + txtSalida.Text.Trim(),
+                    "autor=" + txtAutor.Text.Trim(),
                     "resumen=" + (chkResumen.Checked ? "1" : "0"),
                     "abrir=" + (chkAbrir.Checked ? "1" : "0"),
                     "pdf=" + (chkPdf.Checked ? "1" : "0")
@@ -1070,6 +1311,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 if (cfg.TryGetValue("archivos", out v)) SetTextoReal(txtMods, v, PhArchivos);
                 if (cfg.TryGetValue("extensiones", out v)) txtExts.Text = v;
                 if (cfg.TryGetValue("salida", out v)) txtSalida.Text = v;
+                if (cfg.TryGetValue("autor", out v)) txtAutor.Text = v;
                 if (cfg.TryGetValue("resumen", out v)) chkResumen.Checked = v != "0";
                 if (cfg.TryGetValue("abrir", out v)) chkAbrir.Checked = v != "0";
                 if (cfg.TryGetValue("pdf", out v)) chkPdf.Checked = v == "1";
@@ -1080,7 +1322,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         public MainForm()
         {
             Text = "Reporte de cambios SVN por modulo";
-            ClientSize = new Size(704, 540);
+            ClientSize = new Size(704, 578);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1101,7 +1343,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             tips.SetToolTip(lProj, TtProj);
             tips.SetToolTip(txtProj, TtProj);
             tips.SetToolTip(btnDir, "Seleccionar la carpeta de un working copy local.");
-            SetPlaceholder(txtProj, "https://servidor/svn/repo/trunk  o  C:\\ruta\\workingcopy");
+            SetPlaceholder(txtProj, "https://servidor/svn/repo/trunk  o  C:\\ruta\\repo (SVN o Git)");
 
             y += 38;
             var lDesde = AddLbl("Desde:", 15, y, 280);
@@ -1142,6 +1384,14 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             chkResumen.Checked = true;
             Controls.Add(chkResumen);
             tips.SetToolTip(chkResumen, TtResumen);
+
+            y += 38;
+            var lAutor = AddLbl("Autor del reporte:", 15, y, 280);
+            y += 20;
+            txtAutor = AddTxt(15, y, 280);
+            tips.SetToolTip(lAutor, TtAutor);
+            tips.SetToolTip(txtAutor, TtAutor);
+            SetPlaceholder(txtAutor, "Nombre de quien genera el reporte");
 
             y += 38;
             var lSalida = AddLbl("Archivo de salida:", 15, y, 500);
@@ -1259,8 +1509,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         {
             try
             {
-                if (!Svn.Disponible()) throw new InvalidOperationException("No se encontro svn.exe en el PATH.");
-                if (txtProj.Text.Trim().Length == 0) throw new ArgumentException("Indique la URL o carpeta del proyecto SVN.");
+                if (txtProj.Text.Trim().Length == 0) throw new ArgumentException("Indique la URL o carpeta del proyecto (SVN o Git).");
                 if (txtDesde.Text.Trim().Length == 0) throw new ArgumentException("Indique el valor \"Desde\" (fecha o revision).");
 
                 var opt = new ReportOptions();
@@ -1270,6 +1519,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 opt.Modulos = Texto.SplitLista(TextoReal(txtMods));
                 opt.Extensiones = Texto.SplitLista(txtExts.Text);
                 opt.Salida = txtSalida.Text.Trim();
+                opt.Autor = txtAutor.Text.Trim();
                 opt.IncluirResumen = chkResumen.Checked;
                 opt.ExportarPdf = chkPdf.Checked;
 
@@ -1291,6 +1541,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             btnCerrar.Enabled = !busy;
             txtProj.Enabled = !busy; txtDesde.Enabled = !busy; txtHasta.Enabled = !busy;
             txtMods.Enabled = !busy; txtExts.Enabled = !busy; txtSalida.Enabled = !busy;
+            txtAutor.Enabled = !busy;
             btnDir.Enabled = !busy; btnSalida.Enabled = !busy;
             chkResumen.Enabled = !busy; chkAbrir.Enabled = !busy; chkPdf.Enabled = !busy;
         }
@@ -1405,10 +1656,12 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                    "  ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev>\r\n" +
                    "      [-Hasta <fecha|rev|HEAD>] [-Archivos \"A,B,C\"] [-Extensiones \"BAS,DAT\"]\r\n" +
                    "      [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]\r\n" +
-                   "      [-Pdf] [-SalidaPdf archivo.pdf]\r\n" +
+                   "      [-Pdf] [-SalidaPdf archivo.pdf] [-Autor \"Nombre\"] [-Vcs auto|svn|git]\r\n" +
                    "Notas: -Modulos es alias de -Archivos. Sin -Archivos y/o sin -Extensiones\r\n" +
                    "       se incluyen TODOS los archivos / cualquier extension.\r\n" +
-                   "Dependencia: solo svn.exe en el PATH. El PDF usa Edge integrado en Windows.";
+                   "       SVN: URL o working copy. Git: carpeta local del repositorio clonado\r\n" +
+                   "       (en Git el rango de commits es desde..hasta, exclusivo del inicial).\r\n" +
+                   "Dependencias: svn.exe y/o git.exe en el PATH. El PDF usa Edge integrado en Windows.";
         }
 
         private static ReportOptions ParseArgs(string[] args)
@@ -1423,6 +1676,8 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 else if (a == "-archivos" || a == "-modulos") opt.Modulos = Texto.SplitLista(Next(args, ref i, a));
                 else if (a == "-extensiones") opt.Extensiones = Texto.SplitLista(Next(args, ref i, a));
                 else if (a == "-salida") opt.Salida = Next(args, ref i, a);
+                else if (a == "-autor") opt.Autor = Next(args, ref i, a);
+                else if (a == "-vcs") opt.Vcs = Next(args, ref i, a);
                 else if (a == "-sinresumen") opt.IncluirResumen = false;
                 else if (a == "-abriralterminar") opt.AbrirAlTerminar = true;
                 else if (a == "-pdf") opt.ExportarPdf = true;

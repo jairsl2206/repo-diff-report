@@ -46,6 +46,14 @@
 .PARAMETER SalidaPdf
     Ruta del PDF (default: mismo nombre que el HTML con extension .pdf). Implica -Pdf.
 
+.PARAMETER Autor
+    Nombre que aparecera como Autor en la portada del reporte.
+
+.PARAMETER Vcs
+    Tipo de repositorio: auto (default), svn o git.
+    SVN: URL o working copy. Git: carpeta local del repositorio clonado
+    (en Git el rango de commits es desde..hasta, exclusivo del inicial).
+
 .PARAMETER Gui
     Fuerza la interfaz grafica.
 
@@ -69,6 +77,8 @@ param(
     [switch]$AbrirAlTerminar,
     [switch]$Pdf,
     [string]$SalidaPdf = '',
+    [string]$Autor = '',
+    [string]$Vcs = 'auto',
     [switch]$Gui
 )
 
@@ -84,11 +94,16 @@ function Test-SvnDisponible {
     return ($null -ne $cmd)
 }
 
-function Invoke-SvnRaw {
-    # Ejecuta svn y devuelve stdout como BYTES (sin recodificar) + stderr como texto.
-    param([string[]]$Argumentos)
+function Test-GitDisponible {
+    $cmd = Get-Command git -ErrorAction SilentlyContinue
+    return ($null -ne $cmd)
+}
+
+function Invoke-ProcRaw {
+    # Ejecuta un proceso y devuelve stdout como BYTES (sin recodificar) + stderr como texto.
+    param([string]$Exe, [string[]]$Argumentos)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'svn'
+    $psi.FileName = $Exe
     $quoted = foreach ($a in $Argumentos) {
         if ($a -match '[\s"]') { '"' + ($a -replace '"','\"') + '"' } else { $a }
     }
@@ -107,6 +122,16 @@ function Invoke-SvnRaw {
         Bytes    = $ms.ToArray()
         StdErr   = $errTask.Result
     }
+}
+
+function Invoke-SvnRaw {
+    param([string[]]$Argumentos)
+    return Invoke-ProcRaw -Exe 'svn' -Argumentos $Argumentos
+}
+
+function Invoke-GitRaw {
+    param([string[]]$Argumentos)
+    return Invoke-ProcRaw -Exe 'git' -Argumentos $Argumentos
 }
 
 function Convert-BytesToText {
@@ -136,6 +161,28 @@ function ConvertTo-RevExpr {
     if ($v -match '^\{.+\}$') { return $v }
     if ($v -match '^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$') { return '{' + $v + '}' }
     throw ('Valor de fecha/revision no valido: "' + $v + '". Use YYYY-MM-DD, un numero de revision o HEAD.')
+}
+
+function Test-EsFecha {
+    param([string]$Valor)
+    return (('' + $Valor).Trim() -match '^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$')
+}
+
+function Get-VcsTipo {
+    # Devuelve 'svn' o 'git' segun el objetivo y la preferencia del usuario.
+    param([string]$Objetivo, [string]$Preferencia)
+    $p = ('' + $Preferencia).Trim().ToLower()
+    if ($p -eq 'svn') { return 'svn' }
+    if ($p -eq 'git') { return 'git' }
+    if ($Objetivo -match '^[A-Za-z][A-Za-z0-9+.\-]*://') { return 'svn' }
+    if (Test-Path -LiteralPath $Objetivo) {
+        if (Test-Path -LiteralPath (Join-Path $Objetivo '.svn')) { return 'svn' }
+        if (Test-GitDisponible) {
+            $r = Invoke-GitRaw -Argumentos @('-C', $Objetivo, 'rev-parse', '--is-inside-work-tree')
+            if ($r.ExitCode -eq 0) { return 'git' }
+        }
+    }
+    return 'svn'
 }
 
 function HtmlEnc {
@@ -207,6 +254,7 @@ function Get-LogEntradas {
         }
         [void]$entradas.Add((New-Object PSObject -Property @{
             Rev     = ('' + $le.GetAttribute('revision'))
+            FullRev = ('' + $le.GetAttribute('revision'))
             Author  = $autor
             Date    = $fecha
             Msg     = $msg
@@ -229,6 +277,116 @@ function Get-DiffRevision {
         return ('@@ERROR@@' + $r.StdErr)
     }
     return (Convert-BytesToText -Bytes $r.Bytes)
+}
+
+# ============================================================================
+#  GIT: LOG / DIFF
+# ============================================================================
+
+function Get-GitLogEntradas {
+    param([string]$Dir, [string]$DesdeV, [string]$HastaV, [System.Text.RegularExpressions.Regex]$Patron)
+    $args = New-Object System.Collections.ArrayList
+    [void]$args.AddRange(@('-c','core.quotepath=off','-C',$Dir,'log','--reverse','--no-color','--date=iso-strict','--name-status',
+        '--pretty=format:%x1e%h%x1f%H%x1f%an%x1f%ad%x1f%B%x1f'))
+    $d = ('' + $DesdeV).Trim()
+    $h = ('' + $HastaV).Trim()
+    $rangoRev = $null
+    if ($d -ne '' -and -not (Test-EsFecha $d)) {
+        $fin = 'HEAD'
+        if ($h -ne '' -and -not (Test-EsFecha $h)) { $fin = $h }
+        $rangoRev = ($d + '..' + $fin)
+    } elseif ($d -ne '') {
+        [void]$args.Add('--since=' + $d)
+    }
+    if (Test-EsFecha $h) { [void]$args.Add('--until=' + $h) }
+    elseif ($null -eq $rangoRev -and $h -ne '' -and $h.ToUpper() -ne 'HEAD') { $rangoRev = $h }
+    if ($null -ne $rangoRev) { [void]$args.Add($rangoRev) }
+
+    $r = Invoke-GitRaw -Argumentos @($args)
+    if ($r.ExitCode -ne 0) { throw ("git log fallo:`n" + $r.StdErr) }
+    $texto = Convert-BytesToText -Bytes $r.Bytes
+
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($rec in $texto.Split([char]0x1e)) {
+        if ($rec.Trim().Length -eq 0) { continue }
+        $partes = $rec.Split([char[]]@([char]0x1f), 6)
+        if ($partes.Count -lt 6) { continue }
+        $fecha = ('' + $partes[3]).Trim()
+        try {
+            $fecha = [datetime]::Parse($fecha, [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime().ToString('yyyy-MM-dd HH:mm')
+        } catch { }
+        $targets = New-Object System.Collections.ArrayList
+        $otros   = New-Object System.Collections.ArrayList
+        foreach ($ln in [regex]::Split(('' + $partes[5]), "\r?\n")) {
+            $t = $ln.Trim()
+            if ($t.Length -eq 0) { continue }
+            $cols = $t.Split("`t")
+            if ($cols.Count -lt 2) { continue }
+            $st = ('' + $cols[0]).Trim()
+            if ($st.Length -eq 0) { continue }
+            $acc = $st.Substring(0,1).ToUpper()
+            if ('MADRC'.IndexOf($acc) -lt 0) { continue }
+            $ruta = ('' + $cols[$cols.Count - 1]).Trim()
+            $item = New-Object PSObject -Property @{ Action = $acc; Path = ('/' + $ruta.Replace('\','/')) }
+            if ($Patron.IsMatch($item.Path)) { [void]$targets.Add($item) } else { [void]$otros.Add($item) }
+        }
+        [void]$lista.Add((New-Object PSObject -Property @{
+            Rev     = ('' + $partes[0]).Trim()
+            FullRev = ('' + $partes[1]).Trim()
+            Author  = ('' + $partes[2]).Trim()
+            Date    = $fecha
+            Msg     = ('' + $partes[4]).Trim()
+            Targets = @($targets)
+            Others  = @($otros)
+        }))
+    }
+    return ,@($lista)
+}
+
+function Get-GitDiffCommit {
+    param([string]$Dir, [string]$FullRev, [object[]]$Targets)
+    $rutas = New-Object System.Collections.ArrayList
+    foreach ($t in @($Targets)) {
+        if ($t.Action -ne 'D') { [void]$rutas.Add($t.Path.TrimStart('/')) }
+    }
+    if ($rutas.Count -eq 0) { return '' }
+    $args = @('-c','core.quotepath=off','-C',$Dir,'diff','--no-color','--unified=3',($FullRev + '^'),$FullRev,'--') + @($rutas)
+    $r = Invoke-GitRaw -Argumentos $args
+    if ($r.ExitCode -ne 0) {
+        $args2 = @('-c','core.quotepath=off','-C',$Dir,'show','--no-color','--unified=3','--format=',$FullRev,'--') + @($rutas)
+        $r = Invoke-GitRaw -Argumentos $args2
+        if ($r.ExitCode -ne 0 -and $r.Bytes.Length -eq 0) {
+            return ('@@ERROR@@' + $r.StdErr)
+        }
+    }
+    return (Convert-BytesToText -Bytes $r.Bytes)
+}
+
+function Split-SeccionesGit {
+    # Divide la salida de git diff en secciones por "diff --git a/X b/X".
+    param([string]$DiffTexto)
+    $secciones = @{}
+    $actual = $null
+    $buf = $null
+    $reHdr = [regex]'^diff --git a/(.+) b/(.+)$'
+    foreach ($linea in [regex]::Split($DiffTexto, "\r?\n")) {
+        $m = $reHdr.Match($linea)
+        if ($m.Success) {
+            if ($null -ne $actual) { $secciones[$actual] = $buf }
+            $partes = $m.Groups[2].Value.Trim() -split '[\\/]'
+            $actual = $partes[$partes.Length - 1]
+            $buf = New-Object System.Collections.ArrayList
+        } elseif ($null -ne $actual) {
+            if ($linea.StartsWith('Binary files ') -or $linea.StartsWith('GIT binary patch')) {
+                [void]$buf.Add('Cannot display: archivo binario.')
+            } else {
+                [void]$buf.Add($linea)
+            }
+        }
+    }
+    if ($null -ne $actual) { $secciones[$actual] = $buf }
+    return $secciones
 }
 
 # ============================================================================
@@ -538,25 +696,41 @@ function New-SvnChangeReport {
         [bool]$IncluirResumen = $true,
         [bool]$ExportarPdf = $false,
         [string]$RutaPdf = '',
+        [string]$AutorReporte = '',
+        [string]$Vcs = 'auto',
         [scriptblock]$OnProgress,
         [scriptblock]$ShouldCancel
     )
 
-    if (-not (Test-SvnDisponible)) { throw 'No se encontro svn.exe en el PATH. Instale un cliente SVN de linea de comandos.' }
-
     $mods = Split-Lista -Valores $Modulos
     $exts = Split-Lista -Valores $Extensiones
 
-    $rangoExpr = (ConvertTo-RevExpr -Valor $Desde) + ':' + (ConvertTo-RevExpr -Valor $Hasta)
-
     $objetivo = ('' + $ProjectPath).Trim()
-    if ($objetivo -eq '') { throw 'Debe indicar la URL o ruta del proyecto SVN.' }
+    if ($objetivo -eq '') { throw 'Debe indicar la URL o ruta del proyecto (SVN o Git).' }
     if ($objetivo -notmatch '^[A-Za-z][A-Za-z0-9+\.\-]*://') {
         if (Test-Path -LiteralPath $objetivo) { $objetivo = (Resolve-Path -LiteralPath $objetivo).Path }
     }
-    $info = Get-SvnInfoXml -Target $objetivo
-    $url = $info.Url
-    $root = $info.Root
+
+    $kind = Get-VcsTipo -Objetivo $objetivo -Preferencia $Vcs
+    $url = ''; $root = ''; $dirGit = ''
+    if ($kind -eq 'svn') {
+        if (-not (Test-SvnDisponible)) { throw 'No se encontro svn.exe en el PATH. Instale un cliente SVN de linea de comandos.' }
+        if ($null -ne $OnProgress) { & $OnProgress 0 1 'Consultando informacion del repositorio (SVN)...' }
+        $info = Get-SvnInfoXml -Target $objetivo
+        $url = $info.Url
+        $root = $info.Root
+    } else {
+        if ($objetivo -match '^[A-Za-z][A-Za-z0-9+\.\-]*://') { throw 'Para repositorios Git indique la carpeta local del clon (no una URL).' }
+        if (-not (Test-GitDisponible)) { throw 'No se encontro git.exe en el PATH. Instale Git para Windows.' }
+        if ($null -ne $OnProgress) { & $OnProgress 0 1 'Consultando informacion del repositorio (Git)...' }
+        $rt = Invoke-GitRaw -Argumentos @('-C', $objetivo, 'rev-parse', '--show-toplevel')
+        if ($rt.ExitCode -ne 0) { throw ("La carpeta no es un repositorio Git valido:`n" + $rt.StdErr) }
+        $dirGit = (Convert-BytesToText -Bytes $rt.Bytes).Trim()
+        $rr = Invoke-GitRaw -Argumentos @('-C', $objetivo, 'config', '--get', 'remote.origin.url')
+        $remoto = ''
+        if ($rr.ExitCode -eq 0) { $remoto = (Convert-BytesToText -Bytes $rr.Bytes).Trim() }
+        if ($remoto -ne '') { $url = $remoto } else { $url = $dirGit.Replace('\','/') }
+    }
 
     $modPat = (@($mods | ForEach-Object { [regex]::Escape($_) }) -join '|')
     $extPat = (@($exts | ForEach-Object { [regex]::Escape($_) }) -join '|')
@@ -571,8 +745,16 @@ function New-SvnChangeReport {
     }
     $patronOtraX = New-Object System.Text.RegularExpressions.Regex ("/($modPat)\.([A-Za-z0-9]+)$", 'IgnoreCase')
 
-    if ($null -ne $OnProgress) { & $OnProgress 0 1 'Consultando log SVN...' }
-    $entradas = Get-LogEntradas -Url $url -Rango $rangoExpr -Patron $patron
+    $vcsNombre = 'SVN'
+    $prefRev = 'r'
+    if ($kind -eq 'git') { $vcsNombre = 'Git'; $prefRev = '' }
+    if ($null -ne $OnProgress) { & $OnProgress 0 1 ('Consultando log ' + $vcsNombre + '...') }
+    if ($kind -eq 'git') {
+        $entradas = Get-GitLogEntradas -Dir $dirGit -DesdeV $Desde -HastaV $Hasta -Patron $patron
+    } else {
+        $rangoExpr = (ConvertTo-RevExpr -Valor $Desde) + ':' + (ConvertTo-RevExpr -Valor $Hasta)
+        $entradas = Get-LogEntradas -Url $url -Rango $rangoExpr -Patron $patron
+    }
     $matched = @($entradas | Where-Object { $_.Targets.Count -gt 0 })
 
     # --- Descarga de diffs (secuencial) ---
@@ -584,12 +766,19 @@ function New-SvnChangeReport {
     foreach ($e in $matched) {
         $idx++
         if ($null -ne $ShouldCancel -and (& $ShouldCancel)) { throw (New-Object System.OperationCanceledException 'Operacion cancelada por el usuario.') }
-        if ($null -ne $OnProgress) { & $OnProgress $idx $matched.Count ('Descargando diff r' + $e.Rev + '  (' + $idx + '/' + $matched.Count + ')') }
+        if ($null -ne $OnProgress) { & $OnProgress $idx $matched.Count ('Descargando diff ' + $prefRev + $e.Rev + '  (' + $idx + '/' + $matched.Count + ')') }
 
-        $texto = Get-DiffRevision -Root $root -Rev $e.Rev -Targets $e.Targets
+        if ($kind -eq 'git') {
+            $fullRev = $e.Rev
+            if (('' + $e.FullRev).Trim() -ne '') { $fullRev = $e.FullRev }
+            $texto = Get-GitDiffCommit -Dir $dirGit -FullRev $fullRev -Targets $e.Targets
+        } else {
+            $texto = Get-DiffRevision -Root $root -Rev $e.Rev -Targets $e.Targets
+        }
         $errRev = $null
         $secciones = @{}
         if ($texto.StartsWith('@@ERROR@@')) { $errRev = $texto.Substring(9) }
+        elseif ($kind -eq 'git') { $secciones = Split-SeccionesGit -DiffTexto $texto }
         else { $secciones = Split-Secciones -DiffTexto $texto }
 
         $archivos = New-Object System.Collections.Specialized.OrderedDictionary
@@ -639,6 +828,8 @@ h1{font-size:22px;margin:8px 0}
 h2{font-size:17px;margin:0}
 .meta{color:#57606a;font-size:12px}
 .cover{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:18px 22px;margin:14px 0}
+.coverrow{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}
+.coverlogo{width:84px;height:84px;object-fit:contain;flex:0 0 auto}
 .cover .brand{font-size:11px;letter-spacing:3px;color:#57606a;text-transform:uppercase;font-weight:700}
 .cover h1{margin:6px 0 2px 0;font-size:24px}
 .cover .sub{color:#57606a;font-size:13px;margin-bottom:10px}
@@ -675,8 +866,40 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 @page{size:landscape;margin:10mm}
 @media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 '@
-    $js = 'function setAll(open){document.querySelectorAll("details.file").forEach(function(d){d.open=open;});}'
+    $js = ('function setAll(open){document.querySelectorAll("details.file").forEach(function(d){d.open=open;});}' +
+           'window.addEventListener("beforeprint",function(){document.querySelectorAll("details").forEach(function(d){d.setAttribute("data-wasopen",d.open?"1":"0");d.open=true;});});' +
+           'window.addEventListener("afterprint",function(){document.querySelectorAll("details").forEach(function(d){if(d.getAttribute("data-wasopen")==="0"){d.open=false;}d.removeAttribute("data-wasopen");});});')
 
+    $logoB64 = @(
+'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'
+) -join ''
     $nl = "`n"
     $sb = New-Object System.Text.StringBuilder (4MB)
     $ahora = (Get-Date).ToString('yyyy-MM-dd HH:mm')
@@ -688,18 +911,22 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     if ($exts.Count -gt 0) { $extsTxt = '(.' + (HtmlEnc ($exts -join ' / .')) + ')' }
     $modsTxt = '(todos los archivos)'
     if ($mods.Count -gt 0) { $modsTxt = HtmlEnc ($mods -join ', ') }
-    [void]$sb.Append("<div class='cover'>$nl")
+    [void]$sb.Append("<div class='cover'><div class='coverrow'><div>$nl")
     [void]$sb.Append("<div class='brand'>Napse Global &middot; TOTVS</div>$nl")
     [void]$sb.Append("<h1>Reporte de cambios por archivo</h1>$nl")
-    [void]$sb.Append("<div class='sub'>Control de cambios sobre repositorio SVN</div>$nl")
+    [void]$sb.Append(("<div class='sub'>Control de cambios sobre repositorio {0}</div>$nl" -f $vcsNombre))
     [void]$sb.Append("<table class='info'>$nl")
     [void]$sb.Append(("<tr><td>Repositorio</td><td>{0}</td></tr>$nl" -f (HtmlEnc $url)))
     [void]$sb.Append(("<tr><td>Rango analizado</td><td>{0} &rarr; {1}</td></tr>$nl" -f (HtmlEnc $Desde), (HtmlEnc $Hasta)))
     [void]$sb.Append(("<tr><td>Filtro de archivos</td><td>{0} &nbsp;{1}</td></tr>$nl" -f $modsTxt, $extsTxt))
     [void]$sb.Append(("<tr><td>Fecha de generaci&oacute;n</td><td>{0}</td></tr>$nl" -f $ahora))
-    [void]$sb.Append("<tr><td>Autor</td><td>Jair Salda&ntilde;a</td></tr>$nl")
+    $autorTxt = '&mdash;'
+    if (('' + $AutorReporte).Trim() -ne '') { $autorTxt = HtmlEnc ($AutorReporte.Trim()) }
+    [void]$sb.Append(("<tr><td>Autor</td><td>{0}</td></tr>$nl" -f $autorTxt))
     [void]$sb.Append("<tr><td>Compa&ntilde;&iacute;a</td><td>Napse Global</td></tr>$nl")
     [void]$sb.Append("</table></div>$nl")
+    [void]$sb.Append("<img class='coverlogo' src='data:image/png;base64,$logoB64' alt='TOTVS'>$nl")
+    [void]$sb.Append("</div></div>$nl")
     [void]$sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>$nl")
 
     [void]$sb.Append(("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>{0} revisiones afectan los archivos listados. Total de cambios por archivo:</p>$nl" -f $matched.Count))
@@ -741,20 +968,22 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     }
 
     [void]$sb.Append("<h2>&Iacute;ndice de revisiones</h2>$nl")
-    [void]$sb.Append("<table class='toc'><tr><th style='width:70px'>Revisi&oacute;n</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>$nl")
+    $colRev = 'Revisi&oacute;n'
+    if ($kind -eq 'git') { $colRev = 'Commit' }
+    [void]$sb.Append("<table class='toc'><tr><th style='width:80px'>$colRev</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>$nl")
     foreach ($e in $matched) {
         $vs = Get-VersionesDeMensaje -Msg $e.Msg
         $vsTxt = '&mdash;'
         if ($vs.Count -gt 0) { $vsTxt = HtmlEnc ($vs -join ', ') }
         $modsRev = @($e.Targets | ForEach-Object { $_.Path.Split('/')[-1] } | Sort-Object -Unique) -join ', '
-        [void]$sb.Append(("<tr><td><a href='#r{0}'>r{0}</a></td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td><td>{5}</td></tr>$nl" -f $e.Rev, $e.Date.Substring(0,10), $vsTxt, (HtmlEnc $e.Author), (HtmlEnc $modsRev), (HtmlEnc (Get-DescripcionCorta -Msg $e.Msg))))
+        [void]$sb.Append(("<tr><td><a href='#r{0}'>{6}{0}</a></td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td><td>{5}</td></tr>$nl" -f $e.Rev, $e.Date.Substring(0,10), $vsTxt, (HtmlEnc $e.Author), (HtmlEnc $modsRev), (HtmlEnc (Get-DescripcionCorta -Msg $e.Msg)), $prefRev))
     }
     [void]$sb.Append("</table>$nl")
 
     foreach ($e in $matched) {
         $vs = Get-VersionesDeMensaje -Msg $e.Msg
         [void]$sb.Append(("<div class='card' id='r{0}'><div class='hd'>$nl" -f $e.Rev))
-        [void]$sb.Append(("<span class='badge'>r{0}</span>$nl" -f $e.Rev))
+        [void]$sb.Append(("<span class='badge'>{1}{0}</span>$nl" -f $e.Rev, $prefRev))
         foreach ($v in $vs) { [void]$sb.Append(("<span class='badge ver'>v{0}</span>$nl" -f (HtmlEnc $v))) }
         [void]$sb.Append(("<span class='badge aut'>{0}</span>$nl" -f (HtmlEnc $e.Author)))
         [void]$sb.Append(("<h2>{0}</h2></div>$nl" -f (HtmlEnc $e.Date)))
@@ -821,7 +1050,9 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         [void]$sb.Append("</div>$nl")
     }
 
-    [void]$sb.Append("<p class='small'>Documento generado con ReporteCambiosSVN.ps1 (svn log --xml + svn diff -c REV). Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>$nl")
+    $cmdTxt = 'svn log --xml + svn diff -c REV'
+    if ($kind -eq 'git') { $cmdTxt = 'git log --name-status + git diff commit^..commit' }
+    [void]$sb.Append(("<p class='small'>Documento generado con ReporteCambiosSVN.ps1 ({0}). Para una &quot;captura&quot; imprimible: Ctrl+P &rarr; Guardar como PDF.</p>$nl" -f $cmdTxt))
     [void]$sb.Append("<p class='small'>Autor: Jair Salda&ntilde;a &middot; Napse Global &mdash; <b>Napse ahora es TOTVS</b>.</p>$nl")
     [void]$sb.Append("</div></body></html>")
 
@@ -873,16 +1104,17 @@ function Show-ReportGui {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
 
-    $ttProj = "URL del repositorio SVN (https://...) o carpeta local de un working copy.`r`nEjemplo: https://servidor/svn/repo/trunk"
-    $ttDesde = "Inicio del rango a analizar.`r`nAcepta fecha (YYYY-MM-DD) o numero de revision.`r`nEjemplos: 2025-08-01  |  31490"
-    $ttHasta = "Fin del rango a analizar.`r`nAcepta fecha (YYYY-MM-DD), numero de revision o HEAD (ultima revision)."
+    $ttProj = "URL del repositorio SVN (https://...), carpeta de un working copy SVN`r`no carpeta local de un repositorio Git (clonado). Se detecta automaticamente.`r`nEjemplo: https://servidor/svn/repo/trunk  |  C:\repos\mi-proyecto"
+    $ttDesde = "Inicio del rango a analizar.`r`nSVN: fecha (YYYY-MM-DD) o numero de revision.`r`nGit: fecha o commit/tag (el commit inicial no se incluye: rango desde..hasta).`r`nEjemplos: 2025-08-01  |  31490  |  1f95ed4"
+    $ttHasta = "Fin del rango a analizar.`r`nSVN: fecha, numero de revision o HEAD.`r`nGit: fecha, commit/tag o HEAD."
     $ttArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).`r`nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP`r`nVacio = se incluyen TODOS los archivos modificados.`r`nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio."
     $ttExts = "Extensiones a considerar, separadas por coma. Ejemplo: BAS,DAT`r`nVacio = cualquier extension."
     $ttResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):`r`nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.`r`nNo usa IA ni servicios externos: el resultado es determinista."
     $ttSalida = "Ruta del archivo HTML a generar.`r`nVacio = se crea automaticamente en el Escritorio."
+    $ttAutor = "Nombre que aparecera como Autor en la portada del reporte.`r`nSe recuerda para la proxima ejecucion."
     $ttAbrir = "Al terminar, abre el PDF (si se exporto) o el HTML."
     $ttPdf = "Ademas del HTML, genera un PDF en hoja apaisada.`r`nUsa Microsoft Edge incluido en Windows 10/11 en modo oculto.`r`nSi Edge no esta disponible, el HTML se genera igual y se muestra un aviso."
-    $ttEstado = 'Requisito: cliente svn.exe en el PATH.'
+    $ttEstado = 'Requisito: svn.exe (repos SVN) y/o git.exe (repos Git) en el PATH.'
 
     if (-not ('RepGui.Native' -as [type])) {
         Add-Type -Namespace RepGui -Name Native -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);'
@@ -903,7 +1135,7 @@ function Show-ReportGui {
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Reporte de cambios SVN por modulo'
-    $f.Size = New-Object System.Drawing.Size(720, 585)
+    $f.Size = New-Object System.Drawing.Size(720, 623)
     $f.FormBorderStyle = 'FixedDialog'
     $f.MaximizeBox = $false
     $f.StartPosition = 'CenterScreen'
@@ -934,7 +1166,7 @@ function Show-ReportGui {
     $tips.SetToolTip($lProj, $ttProj)
     $tips.SetToolTip($txtProj, $ttProj)
     $tips.SetToolTip($btnDir, 'Seleccionar la carpeta de un working copy local.')
-    Set-Cue $txtProj 'https://servidor/svn/repo/trunk  o  C:\ruta\workingcopy'
+    Set-Cue $txtProj 'https://servidor/svn/repo/trunk  o  C:\ruta\repo (SVN o Git)'
 
     $y += 38
     $lDesde = New-Lbl 'Desde:' 15 $y 280
@@ -994,6 +1226,17 @@ function Show-ReportGui {
     $chkResumen.Checked = $true
     $f.Controls.Add($chkResumen)
     $tips.SetToolTip($chkResumen, $ttResumen)
+
+    $y += 38
+    $lAutor = New-Lbl 'Autor del reporte:' 15 $y 280
+    $f.Controls.Add($lAutor)
+    $y += 20
+    $txtAutor = New-Object System.Windows.Forms.TextBox
+    $txtAutor.Location = New-Object System.Drawing.Point(15, $y); $txtAutor.Size = New-Object System.Drawing.Size(280, 23)
+    $f.Controls.Add($txtAutor)
+    $tips.SetToolTip($lAutor, $ttAutor)
+    $tips.SetToolTip($txtAutor, $ttAutor)
+    Set-Cue $txtAutor 'Nombre de quien genera el reporte'
 
     $y += 38
     $lSalida = New-Lbl 'Archivo de salida:' 15 $y 500
@@ -1072,6 +1315,7 @@ function Show-ReportGui {
                 ('archivos=' + (Get-TextoReal $txtMods).Trim()),
                 ('extensiones=' + $txtExts.Text.Trim()),
                 ('salida=' + $txtSalida.Text.Trim()),
+                ('autor=' + $txtAutor.Text.Trim()),
                 ('resumen=' + $(if ($chkResumen.Checked) { '1' } else { '0' })),
                 ('abrir=' + $(if ($chkAbrir.Checked) { '1' } else { '0' })),
                 ('pdf=' + $(if ($chkPdf.Checked) { '1' } else { '0' }))
@@ -1093,6 +1337,7 @@ function Show-ReportGui {
             if ($cfg.ContainsKey('archivos')) { Set-TextoReal $txtMods $cfg['archivos'] $script:phArchivos }
             if ($cfg.ContainsKey('extensiones')) { $txtExts.Text = $cfg['extensiones'] }
             if ($cfg.ContainsKey('salida')) { $txtSalida.Text = $cfg['salida'] }
+            if ($cfg.ContainsKey('autor')) { $txtAutor.Text = $cfg['autor'] }
             if ($cfg.ContainsKey('resumen')) { $chkResumen.Checked = ($cfg['resumen'] -ne '0') }
             if ($cfg.ContainsKey('abrir')) { $chkAbrir.Checked = ($cfg['abrir'] -ne '0') }
             if ($cfg.ContainsKey('pdf')) { $chkPdf.Checked = ($cfg['pdf'] -eq '1') }
@@ -1104,8 +1349,7 @@ function Show-ReportGui {
         $btnGo.Enabled = $false; $btnCancel.Enabled = $true; $btnCerrar.Enabled = $false
         $pb.Value = 0
         try {
-            if (-not (Test-SvnDisponible)) { throw 'No se encontro svn.exe en el PATH.' }
-            if ($txtProj.Text.Trim() -eq '') { throw 'Indique la URL o carpeta del proyecto SVN.' }
+            if ($txtProj.Text.Trim() -eq '') { throw 'Indique la URL o carpeta del proyecto (SVN o Git).' }
             if ($txtDesde.Text.Trim() -eq '') { throw 'Indique el valor "Desde" (fecha o revision).' }
 
             Save-ConfigGui
@@ -1119,6 +1363,7 @@ function Show-ReportGui {
                 -Salida $txtSalida.Text `
                 -IncluirResumen $chkResumen.Checked `
                 -ExportarPdf $chkPdf.Checked `
+                -AutorReporte $txtAutor.Text.Trim() `
                 -OnProgress {
                     param($i, $t, $m)
                     if ($t -gt 0) { $pb.Value = [Math]::Min(100, [int](100 * $i / $t)) }
@@ -1190,6 +1435,8 @@ $resultado = New-SvnChangeReport `
     -IncluirResumen (-not $SinResumen.IsPresent) `
     -ExportarPdf ($Pdf.IsPresent -or ('' + $SalidaPdf).Trim() -ne '') `
     -RutaPdf $SalidaPdf `
+    -AutorReporte $Autor `
+    -Vcs $Vcs `
     -OnProgress {
         param($i, $t, $m)
         $pct = 0
