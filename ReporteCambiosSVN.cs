@@ -28,6 +28,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
@@ -43,8 +44,8 @@ using System.Xml;
 [assembly: AssemblyDescription("Reporte HTML/PDF de cambios SVN/Git por archivo (diffs lado a lado). Autor: Jair Salda\u00f1a. Requiere svn.exe y/o git.exe")]
 [assembly: AssemblyCompany("Napse Global \u00b7 TOTVS")]
 [assembly: AssemblyCopyright("\u00a9 2026 Jair Salda\u00f1a \u00b7 Napse Global \u2014 Napse ahora es TOTVS")]
-[assembly: AssemblyVersion("1.2.1.0")]
-[assembly: AssemblyFileVersion("1.2.1.0")]
+[assembly: AssemblyVersion("1.2.4.0")]
+[assembly: AssemblyFileVersion("1.2.4.0")]
 
 namespace ReporteCambiosSvn
 {
@@ -188,6 +189,10 @@ namespace ReporteCambiosSvn
         public string ProjectPath = "", Desde = "", Hasta = "HEAD", Salida = "";
         public string Autor = "";
         public string Vcs = "auto";
+        public string Orden = "asc";
+        public bool ExcluirMvnRelease = false;
+        public bool ExcluirMvnPrepare = false;
+        public bool ExportarZip = false;
         public List<string> Modulos = new List<string>();
         public List<string> Extensiones = new List<string>();
         public bool IncluirResumen = true;
@@ -201,6 +206,8 @@ namespace ReporteCambiosSvn
         public string Salida = "";
         public string SalidaPdf = "";
         public string PdfError = null;
+        public string SalidaZip = "";
+        public string ZipError = null;
         public int Revisiones, Archivos, Bloques;
         public List<string> SinCambios = new List<string>();
     }
@@ -414,6 +421,10 @@ namespace ReporteCambiosSvn
             var mods = new List<string>(opt.Modulos);
             var exts = new List<string>(opt.Extensiones);
 
+            string orden = (opt.Orden ?? "asc").Trim().ToLowerInvariant();
+            if (orden != "asc" && orden != "desc")
+                throw new ArgumentException("Valor de -Orden no valido: \"" + opt.Orden + "\". Use asc (antiguas primero) o desc (recientes primero).");
+
             string objetivo = (opt.ProjectPath ?? "").Trim();
             if (objetivo.Length == 0) throw new ArgumentException("Debe indicar la URL o ruta del proyecto (SVN o Git).");
             if (!Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://") && Directory.Exists(objetivo))
@@ -471,6 +482,9 @@ namespace ReporteCambiosSvn
                 entradas = LogEntries(url, rango, patron);
             }
             var matched = entradas.Where(e => e.Targets.Count > 0).ToList();
+            if (opt.ExcluirMvnRelease) matched = matched.Where(e => !EsCommitMavenRelease(e.Msg)).ToList();
+            if (opt.ExcluirMvnPrepare) matched = matched.Where(e => !EsCommitMavenPrepare(e.Msg)).ToList();
+            if (orden == "desc") matched.Reverse();
 
             var parsedPorRev = new Dictionary<string, List<KeyValuePair<string, FileDiff>>>();
             var modCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -591,6 +605,28 @@ namespace ReporteCambiosSvn
                 catch (Exception ex)
                 {
                     res.PdfError = ex.Message;
+                }
+            }
+
+            if (opt.ExportarZip)
+            {
+                progress(matched.Count, Math.Max(1, matched.Count), "Comprimiendo salida (ZIP)...");
+                string zipPath = System.IO.Path.ChangeExtension(salida, ".zip");
+                try
+                {
+                    if (File.Exists(zipPath)) File.Delete(zipPath);
+                    using (var fsZip = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
+                    using (var za = new ZipArchive(fsZip, ZipArchiveMode.Create))
+                    {
+                        za.CreateEntryFromFile(salida, System.IO.Path.GetFileName(salida));
+                        if (res.SalidaPdf.Length > 0 && File.Exists(res.SalidaPdf))
+                            za.CreateEntryFromFile(res.SalidaPdf, System.IO.Path.GetFileName(res.SalidaPdf));
+                    }
+                    res.SalidaZip = zipPath;
+                }
+                catch (Exception ex)
+                {
+                    res.ZipError = ex.Message;
                 }
             }
             return res;
@@ -1003,6 +1039,17 @@ namespace ReporteCambiosSvn
             return txt;
         }
 
+        // Commits generados por el maven-release-plugin.
+        private static bool EsCommitMavenRelease(string msg)
+        {
+            return Regex.IsMatch(msg ?? "", "\\[maven-release-plugin\\]\\s*prepare\\s+release", RegexOptions.IgnoreCase);
+        }
+
+        private static bool EsCommitMavenPrepare(string msg)
+        {
+            return Regex.IsMatch(msg ?? "", "\\[maven-release-plugin\\]\\s*prepare\\s+for\\s+next\\s+development\\s+iteration", RegexOptions.IgnoreCase);
+        }
+
         public static List<string> VersionesDeMensaje(string msg)
         {
             var res = new List<string>();
@@ -1145,6 +1192,12 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 ";
         private const string Js =
             "function setAll(open){document.querySelectorAll(\"details.file\").forEach(function(d){d.open=open;});}" +
+            "function invertirOrden(){" +
+            "var t=document.getElementById(\"idxrev\");" +
+            "if(t&&t.rows.length>2){var b=t.tBodies[0];var rs=Array.prototype.slice.call(b.rows,1);var mk=document.createComment(\"x\");b.appendChild(mk);rs.reverse().forEach(function(r){b.insertBefore(r,mk);});b.removeChild(mk);}" +
+            "var cs=Array.prototype.slice.call(document.querySelectorAll(\"div.card\"));" +
+            "if(cs.length>1){var p=cs[0].parentNode;var m2=document.createComment(\"y\");p.insertBefore(m2,cs[0]);cs.reverse().forEach(function(c){p.insertBefore(c,m2);});p.removeChild(m2);}" +
+            "}" +
             "window.addEventListener(\"beforeprint\",function(){document.querySelectorAll(\"details\").forEach(function(d){d.setAttribute(\"data-wasopen\",d.open?\"1\":\"0\");d.open=true;});});" +
             "window.addEventListener(\"afterprint\",function(){document.querySelectorAll(\"details\").forEach(function(d){if(d.getAttribute(\"data-wasopen\")===\"0\"){d.open=false;}d.removeAttribute(\"data-wasopen\");});});";
 
@@ -1173,6 +1226,11 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             sb.Append("<tr><td>Repositorio</td><td>" + Texto.E(url) + "</td></tr>" + nl);
             sb.Append("<tr><td>Rango analizado</td><td>" + Texto.E(opt.Desde) + " &rarr; " + Texto.E(opt.Hasta) + "</td></tr>" + nl);
             sb.Append("<tr><td>Filtro de archivos</td><td>" + modsTxt + " &nbsp;" + extsTxt + "</td></tr>" + nl);
+            var excl = new List<string>();
+            if (opt.ExcluirMvnRelease) excl.Add("commits de mvn release ([maven-release-plugin] prepare release)");
+            if (opt.ExcluirMvnPrepare) excl.Add("commits de mvn prepare (prepare for next development iteration)");
+            if (excl.Count > 0)
+                sb.Append("<tr><td>Exclusiones</td><td>" + Texto.E(string.Join("; ", excl)) + "</td></tr>" + nl);
             sb.Append("<tr><td>Fecha de generaci&oacute;n</td><td>" + ahora + "</td></tr>" + nl);
             string autorTxt = (opt.Autor ?? "").Trim().Length > 0 ? Texto.E(opt.Autor.Trim()) : "&mdash;";
             sb.Append("<tr><td>Autor</td><td>" + autorTxt + "</td></tr>" + nl);
@@ -1180,7 +1238,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             sb.Append("</table></div>" + nl);
             sb.Append("<img class='coverlogo' src='data:image/png;base64," + LogoB64 + "' alt='TOTVS'>" + nl);
             sb.Append("</div></div>" + nl);
-            sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>" + nl);
+            sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button><button onclick='invertirOrden()'>Invertir orden</button></div>" + nl);
 
             sb.Append("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>" + matched.Count +
                       " revisiones afectan los archivos listados. Total de cambios por archivo:</p>" + nl);
@@ -1223,7 +1281,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             }
 
             sb.Append("<h2>&Iacute;ndice de revisiones</h2>" + nl);
-            sb.Append("<table class='toc'><tr><th style='width:80px'>" + colRev + "</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
+            sb.Append("<table class='toc' id='idxrev'><tr><th style='width:80px'>" + colRev + "</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>" + nl);
             foreach (var e in matched)
             {
                 var vs = e.Versiones;
@@ -1337,12 +1395,17 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         private const string TtResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):\r\nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.\r\nNo usa IA ni servicios externos: el resultado es determinista.";
         private const string TtSalida = "Ruta del archivo HTML a generar.\r\nVacio = se crea automaticamente en el Escritorio.";
         private const string TtAutor = "Nombre que aparecera como Autor en la portada del reporte.\r\nSe recuerda para la proxima ejecucion.";
+        private const string TtOrden = "Orden de las revisiones en el reporte, por fecha.\r\nDentro del HTML tambien puedes cambiarlo con el boton 'Invertir orden'.";
+        private const string TtExclRel = "Omite los commits generados por el maven-release-plugin al hacer el release:\r\nmensajes '[maven-release-plugin] prepare release ...'.";
+        private const string TtExclPrep = "Omite los commits del maven-release-plugin que saltan a la siguiente version SNAPSHOT:\r\nmensajes '[maven-release-plugin] prepare for next development iteration'.";
         private const string TtAbrir = "Al terminar, abre el PDF (si se exporto) o el HTML.";
         private const string TtPdf = "Ademas del HTML, genera un PDF en hoja apaisada.\r\nUsa Microsoft Edge incluido en Windows 10/11 en modo oculto.\r\nSi Edge no esta disponible, el HTML se genera igual y se muestra un aviso.";
+        private const string TtZip = "Genera un archivo .zip junto a la salida, con el HTML y (si se exporto) el PDF.\r\nUtil para adjuntar o compartir el reporte completo.";
         private const string TtEstado = "Requisito: svn.exe (repos SVN) y/o git.exe (repos Git) en el PATH.";
 
         private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor;
-        private CheckBox chkResumen, chkAbrir, chkPdf;
+        private ComboBox cboOrden;
+        private CheckBox chkResumen, chkAbrir, chkPdf, chkExclRel, chkExclPrep, chkZip;
         private ProgressBar pb;
         private Label lblEstado;
         private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida;
@@ -1408,6 +1471,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                     "extensiones=" + txtExts.Text.Trim(),
                     "salida=" + txtSalida.Text.Trim(),
                     "autor=" + txtAutor.Text.Trim(),
+                    "orden=" + (cboOrden.SelectedIndex == 1 ? "desc" : "asc"),
+                    "exclrelease=" + (chkExclRel.Checked ? "1" : "0"),
+                    "exclprepare=" + (chkExclPrep.Checked ? "1" : "0"),
+                    "zip=" + (chkZip.Checked ? "1" : "0"),
                     "resumen=" + (chkResumen.Checked ? "1" : "0"),
                     "abrir=" + (chkAbrir.Checked ? "1" : "0"),
                     "pdf=" + (chkPdf.Checked ? "1" : "0")
@@ -1436,6 +1503,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 if (cfg.TryGetValue("extensiones", out v)) txtExts.Text = v;
                 if (cfg.TryGetValue("salida", out v)) txtSalida.Text = v;
                 if (cfg.TryGetValue("autor", out v)) txtAutor.Text = v;
+                if (cfg.TryGetValue("orden", out v)) cboOrden.SelectedIndex = v == "desc" ? 1 : 0;
+                if (cfg.TryGetValue("exclrelease", out v)) chkExclRel.Checked = v == "1";
+                if (cfg.TryGetValue("exclprepare", out v)) chkExclPrep.Checked = v == "1";
+                if (cfg.TryGetValue("zip", out v)) chkZip.Checked = v == "1";
                 if (cfg.TryGetValue("resumen", out v)) chkResumen.Checked = v != "0";
                 if (cfg.TryGetValue("abrir", out v)) chkAbrir.Checked = v != "0";
                 if (cfg.TryGetValue("pdf", out v)) chkPdf.Checked = v == "1";
@@ -1446,7 +1517,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         public MainForm()
         {
             Text = "Reporte de cambios SVN por modulo";
-            ClientSize = new Size(704, 578);
+            ClientSize = new Size(704, 634);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1511,11 +1582,36 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 
             y += 38;
             var lAutor = AddLbl("Autor del reporte:", 15, y, 280);
+            var lOrden = AddLbl("Orden de revisiones:", 320, y, 280);
             y += 20;
             txtAutor = AddTxt(15, y, 280);
             tips.SetToolTip(lAutor, TtAutor);
             tips.SetToolTip(txtAutor, TtAutor);
             SetPlaceholder(txtAutor, "Nombre de quien genera el reporte");
+            cboOrden = new ComboBox();
+            cboOrden.Location = new Point(320, y);
+            cboOrden.Size = new Size(280, 23);
+            cboOrden.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboOrden.Items.Add("Mas antiguas primero (ascendente)");
+            cboOrden.Items.Add("Mas recientes primero (descendente)");
+            cboOrden.SelectedIndex = 0;
+            Controls.Add(cboOrden);
+            tips.SetToolTip(lOrden, TtOrden);
+            tips.SetToolTip(cboOrden, TtOrden);
+
+            y += 28;
+            chkExclRel = new CheckBox();
+            chkExclRel.Text = "Excluir commits de mvn release";
+            chkExclRel.Location = new Point(15, y);
+            chkExclRel.Size = new Size(300, 23);
+            Controls.Add(chkExclRel);
+            tips.SetToolTip(chkExclRel, TtExclRel);
+            chkExclPrep = new CheckBox();
+            chkExclPrep.Text = "Excluir commits de mvn prepare";
+            chkExclPrep.Location = new Point(320, y);
+            chkExclPrep.Size = new Size(370, 23);
+            Controls.Add(chkExclPrep);
+            tips.SetToolTip(chkExclPrep, TtExclPrep);
 
             y += 38;
             var lSalida = AddLbl("Archivo de salida:", 15, y, 500);
@@ -1542,6 +1638,14 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             chkPdf.Size = new Size(370, 23);
             Controls.Add(chkPdf);
             tips.SetToolTip(chkPdf, TtPdf);
+
+            y += 28;
+            chkZip = new CheckBox();
+            chkZip.Text = "Comprimir salida en ZIP (HTML + PDF)";
+            chkZip.Location = new Point(15, y);
+            chkZip.Size = new Size(300, 23);
+            Controls.Add(chkZip);
+            tips.SetToolTip(chkZip, TtZip);
 
             y += 32;
             pb = new ProgressBar();
@@ -1644,6 +1748,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 opt.Extensiones = Texto.SplitLista(txtExts.Text);
                 opt.Salida = txtSalida.Text.Trim();
                 opt.Autor = txtAutor.Text.Trim();
+                opt.Orden = cboOrden.SelectedIndex == 1 ? "desc" : "asc";
+                opt.ExcluirMvnRelease = chkExclRel.Checked;
+                opt.ExcluirMvnPrepare = chkExclPrep.Checked;
+                opt.ExportarZip = chkZip.Checked;
                 opt.IncluirResumen = chkResumen.Checked;
                 opt.ExportarPdf = chkPdf.Checked;
 
@@ -1666,6 +1774,9 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
             txtProj.Enabled = !busy; txtDesde.Enabled = !busy; txtHasta.Enabled = !busy;
             txtMods.Enabled = !busy; txtExts.Enabled = !busy; txtSalida.Enabled = !busy;
             txtAutor.Enabled = !busy;
+            cboOrden.Enabled = !busy;
+            chkExclRel.Enabled = !busy; chkExclPrep.Enabled = !busy;
+            chkZip.Enabled = !busy;
             btnDir.Enabled = !busy; btnSalida.Enabled = !busy;
             chkResumen.Enabled = !busy; chkAbrir.Enabled = !busy; chkPdf.Enabled = !busy;
         }
@@ -1711,10 +1822,14 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                              "Bloques de cambio: " + res.Bloques + Environment.NewLine + Environment.NewLine +
                              res.Salida;
             if (res.SalidaPdf.Length > 0) detalle += Environment.NewLine + "PDF: " + res.SalidaPdf;
+            if (res.SalidaZip.Length > 0) detalle += Environment.NewLine + "ZIP: " + res.SalidaZip;
             MessageBox.Show(this, detalle, "Reporte SVN", MessageBoxButtons.OK, MessageBoxIcon.Information);
             if (res.PdfError != null)
                 MessageBox.Show(this, "El HTML se genero correctamente, pero fallo la exportacion a PDF:" +
                                 Environment.NewLine + res.PdfError, "PDF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (res.ZipError != null)
+                MessageBox.Show(this, "El reporte se genero, pero fallo la creacion del ZIP:" +
+                                Environment.NewLine + res.ZipError, "ZIP", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             if (chkAbrir.Checked)
             {
                 string abrir = res.SalidaPdf.Length > 0 ? res.SalidaPdf : res.Salida;
@@ -1756,6 +1871,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                     Console.WriteLine("PDF generado     : " + res.SalidaPdf);
                 if (res.PdfError != null)
                     Console.WriteLine("ADVERTENCIA PDF  : " + res.PdfError);
+                if (res.SalidaZip.Length > 0)
+                    Console.WriteLine("ZIP generado     : " + res.SalidaZip);
+                if (res.ZipError != null)
+                    Console.WriteLine("ADVERTENCIA ZIP  : " + res.ZipError);
                 if (res.SinCambios.Count > 0)
                     Console.WriteLine("Sin cambios      : " + string.Join(", ", res.SinCambios));
                 if (opt.AbrirAlTerminar)
@@ -1781,6 +1900,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                    "      [-Hasta <fecha|rev|HEAD>] [-Archivos \"A,B,C\"] [-Extensiones \"BAS,DAT\"]\r\n" +
                    "      [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]\r\n" +
                    "      [-Pdf] [-SalidaPdf archivo.pdf] [-Autor \"Nombre\"] [-Vcs auto|svn|git]\r\n" +
+                   "      [-Orden asc|desc] [-ExcluirMvnRelease] [-ExcluirMvnPrepare] [-Zip]\r\n" +
                    "Notas: -Modulos es alias de -Archivos. Sin -Archivos y/o sin -Extensiones\r\n" +
                    "       se incluyen TODOS los archivos / cualquier extension.\r\n" +
                    "       SVN: URL o working copy. Git: carpeta local del repositorio clonado\r\n" +
@@ -1802,6 +1922,10 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
                 else if (a == "-salida") opt.Salida = Next(args, ref i, a);
                 else if (a == "-autor") opt.Autor = Next(args, ref i, a);
                 else if (a == "-vcs") opt.Vcs = Next(args, ref i, a);
+                else if (a == "-orden") opt.Orden = Next(args, ref i, a);
+                else if (a == "-excluirmvnrelease") opt.ExcluirMvnRelease = true;
+                else if (a == "-excluirmvnprepare") opt.ExcluirMvnPrepare = true;
+                else if (a == "-zip") opt.ExportarZip = true;
                 else if (a == "-sinresumen") opt.IncluirResumen = false;
                 else if (a == "-abriralterminar") opt.AbrirAlTerminar = true;
                 else if (a == "-pdf") opt.ExportarPdf = true;

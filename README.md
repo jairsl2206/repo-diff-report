@@ -9,6 +9,9 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por ar
 - **Metadatos por revisión**: número/commit, fecha, autor, versión (extraída del mensaje del commit o, si no hay, del `pom.xml` de proyectos Maven) y descripción
 - **Resumen por archivo** (100% regex, determinista, sin IA): líneas ±, funciones nuevas/eliminadas, llamadas, temas detectados
 - **Índice general**: revisiones, archivos afectados y archivos sin cambios en el periodo
+- **Orden por fecha configurable**: ascendente o descendente (`-Orden asc|desc` o combo en la GUI), y botón "Invertir orden" dentro del propio HTML
+- **Exclusión de commits del maven-release-plugin**: checks en la GUI o `-ExcluirMvnRelease` / `-ExcluirMvnPrepare` para omitir los commits `prepare release` y `prepare for next development iteration`
+- **Salida en ZIP**: check en la GUI o `-Zip` para empaquetar el HTML (y el PDF, si se exportó) en un `.zip` junto a la salida
 - **Exportación a PDF** apaisado usando Microsoft Edge integrado en Windows (headless)
 - **GUI** (WinForms) con descripciones en tooltips, textos de ayuda en los campos (formato de fecha/revisión) y **memoria de la última configuración** usada (se guarda en `%APPDATA%\ReporteCambiosSVN`)
 - Filtro por lista de archivos y extensiones, ambos **opcionales**: vacíos = todos los archivos modificados / cualquier extensión
@@ -29,7 +32,7 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por ar
 ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev> ^
     [-Hasta <fecha|rev|HEAD>] [-Archivos "ARCH1,ARCH2"] [-Extensiones "BAS,DAT"] ^
     [-Salida reporte.html] [-SinResumen] [-AbrirAlTerminar] [-Pdf] [-SalidaPdf reporte.pdf] ^
-    [-Autor "Nombre"] [-Vcs auto|svn|git]
+    [-Autor "Nombre"] [-Vcs auto|svn|git] [-Orden asc|desc] [-ExcluirMvnRelease] [-ExcluirMvnPrepare] [-Zip]
 ```
 
 Notas: `-Modulos` se acepta como alias de `-Archivos`. Sin `-Archivos` y/o sin `-Extensiones` se incluyen todos los archivos / cualquier extensión. En Git el rango de commits es `desde..hasta` (exclusivo del commit inicial); las fechas funcionan igual que en SVN.

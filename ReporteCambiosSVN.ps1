@@ -54,6 +54,18 @@
     SVN: URL o working copy. Git: carpeta local del repositorio clonado
     (en Git el rango de commits es desde..hasta, exclusivo del inicial).
 
+.PARAMETER Orden
+    Orden de las revisiones por fecha: asc (antiguas primero, default) o desc (recientes primero).
+
+.PARAMETER ExcluirMvnRelease
+    Omite commits del maven-release-plugin '[maven-release-plugin] prepare release ...'.
+
+.PARAMETER ExcluirMvnPrepare
+    Omite commits '[maven-release-plugin] prepare for next development iteration'.
+
+.PARAMETER Zip
+    Genera un archivo .zip junto a la salida, con el HTML y (si se exporto) el PDF.
+
 .PARAMETER Gui
     Fuerza la interfaz grafica.
 
@@ -79,6 +91,10 @@ param(
     [string]$SalidaPdf = '',
     [string]$Autor = '',
     [string]$Vcs = 'auto',
+    [string]$Orden = 'asc',
+    [switch]$ExcluirMvnRelease,
+    [switch]$ExcluirMvnPrepare,
+    [switch]$Zip,
     [switch]$Gui
 )
 
@@ -166,6 +182,17 @@ function ConvertTo-RevExpr {
 function Test-EsFecha {
     param([string]$Valor)
     return (('' + $Valor).Trim() -match '^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$')
+}
+
+# Commits generados por el maven-release-plugin.
+function Test-CommitMavenRelease {
+    param([string]$Msg)
+    return (('' + $Msg) -match '(?i)\[maven-release-plugin\]\s*prepare\s+release')
+}
+
+function Test-CommitMavenPrepare {
+    param([string]$Msg)
+    return (('' + $Msg) -match '(?i)\[maven-release-plugin\]\s*prepare\s+for\s+next\s+development\s+iteration')
 }
 
 function Get-VcsTipo {
@@ -796,12 +823,21 @@ function New-SvnChangeReport {
         [string]$RutaPdf = '',
         [string]$AutorReporte = '',
         [string]$Vcs = 'auto',
+        [string]$OrdenRev = 'asc',
+        [bool]$ExclMvnRelease = $false,
+        [bool]$ExclMvnPrepare = $false,
+        [bool]$ExportarZip = $false,
         [scriptblock]$OnProgress,
         [scriptblock]$ShouldCancel
     )
 
     $mods = Split-Lista -Valores $Modulos
     $exts = Split-Lista -Valores $Extensiones
+
+    $ordenN = ('' + $OrdenRev).Trim().ToLower()
+    if ($ordenN -ne 'asc' -and $ordenN -ne 'desc') {
+        throw ('Valor de -Orden no valido: "' + $OrdenRev + '". Use asc (antiguas primero) o desc (recientes primero).')
+    }
 
     $objetivo = ('' + $ProjectPath).Trim()
     if ($objetivo -eq '') { throw 'Debe indicar la URL o ruta del proyecto (SVN o Git).' }
@@ -854,6 +890,9 @@ function New-SvnChangeReport {
         $entradas = Get-LogEntradas -Url $url -Rango $rangoExpr -Patron $patron
     }
     $matched = @($entradas | Where-Object { $_.Targets.Count -gt 0 })
+    if ($ExclMvnRelease) { $matched = @($matched | Where-Object { -not (Test-CommitMavenRelease -Msg $_.Msg) }) }
+    if ($ExclMvnPrepare) { $matched = @($matched | Where-Object { -not (Test-CommitMavenPrepare -Msg $_.Msg) }) }
+    if ($ordenN -eq 'desc' -and $matched.Count -gt 1) { [array]::Reverse($matched) }
 
     # --- Descarga de diffs (secuencial) ---
     $parsedPorRev = @{}
@@ -982,6 +1021,12 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
 @media print{ .btns{display:none} body{background:#fff} .card{page-break-before:always} details.file{page-break-inside:auto} details.file>summary{page-break-after:avoid} .filehalf{page-break-after:avoid} .expl{page-break-after:avoid} .msg{page-break-inside:avoid} table.diff tr{page-break-inside:avoid} table.toc tr{page-break-inside:avoid} }
 '@
     $js = ('function setAll(open){document.querySelectorAll("details.file").forEach(function(d){d.open=open;});}' +
+           'function invertirOrden(){' +
+           'var t=document.getElementById("idxrev");' +
+           'if(t&&t.rows.length>2){var b=t.tBodies[0];var rs=Array.prototype.slice.call(b.rows,1);var mk=document.createComment("x");b.appendChild(mk);rs.reverse().forEach(function(r){b.insertBefore(r,mk);});b.removeChild(mk);}' +
+           'var cs=Array.prototype.slice.call(document.querySelectorAll("div.card"));' +
+           'if(cs.length>1){var p=cs[0].parentNode;var m2=document.createComment("y");p.insertBefore(m2,cs[0]);cs.reverse().forEach(function(c){p.insertBefore(c,m2);});p.removeChild(m2);}' +
+           '}' +
            'window.addEventListener("beforeprint",function(){document.querySelectorAll("details").forEach(function(d){d.setAttribute("data-wasopen",d.open?"1":"0");d.open=true;});});' +
            'window.addEventListener("afterprint",function(){document.querySelectorAll("details").forEach(function(d){if(d.getAttribute("data-wasopen")==="0"){d.open=false;}d.removeAttribute("data-wasopen");});});')
 
@@ -1034,6 +1079,12 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     [void]$sb.Append(("<tr><td>Repositorio</td><td>{0}</td></tr>$nl" -f (HtmlEnc $url)))
     [void]$sb.Append(("<tr><td>Rango analizado</td><td>{0} &rarr; {1}</td></tr>$nl" -f (HtmlEnc $Desde), (HtmlEnc $Hasta)))
     [void]$sb.Append(("<tr><td>Filtro de archivos</td><td>{0} &nbsp;{1}</td></tr>$nl" -f $modsTxt, $extsTxt))
+    $excl = New-Object System.Collections.ArrayList
+    if ($ExclMvnRelease) { [void]$excl.Add('commits de mvn release ([maven-release-plugin] prepare release)') }
+    if ($ExclMvnPrepare) { [void]$excl.Add('commits de mvn prepare (prepare for next development iteration)') }
+    if ($excl.Count -gt 0) {
+        [void]$sb.Append(("<tr><td>Exclusiones</td><td>{0}</td></tr>$nl" -f (HtmlEnc ($excl -join '; '))))
+    }
     [void]$sb.Append(("<tr><td>Fecha de generaci&oacute;n</td><td>{0}</td></tr>$nl" -f $ahora))
     $autorTxt = '&mdash;'
     if (('' + $AutorReporte).Trim() -ne '') { $autorTxt = HtmlEnc ($AutorReporte.Trim()) }
@@ -1042,7 +1093,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     [void]$sb.Append("</table></div>$nl")
     [void]$sb.Append("<img class='coverlogo' src='data:image/png;base64,$logoB64' alt='TOTVS'>$nl")
     [void]$sb.Append("</div></div>$nl")
-    [void]$sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button></div>$nl")
+    [void]$sb.Append("<div class='btns'><button onclick='setAll(true)'>Expandir todo</button><button onclick='setAll(false)'>Colapsar todo</button><button onclick='invertirOrden()'>Invertir orden</button></div>$nl")
 
     [void]$sb.Append(("<h2 style='margin-top:14px'>Resumen general</h2><p class='meta'>{0} revisiones afectan los archivos listados. Total de cambios por archivo:</p>$nl" -f $matched.Count))
     [void]$sb.Append("<table class='toc'><tr><th>Archivo</th><th># Revisiones que lo modifican</th></tr>$nl")
@@ -1085,7 +1136,7 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
     [void]$sb.Append("<h2>&Iacute;ndice de revisiones</h2>$nl")
     $colRev = 'Revisi&oacute;n'
     if ($kind -eq 'git') { $colRev = 'Commit' }
-    [void]$sb.Append("<table class='toc'><tr><th style='width:80px'>$colRev</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>$nl")
+    [void]$sb.Append("<table class='toc' id='idxrev'><tr><th style='width:80px'>$colRev</th><th style='width:110px'>Fecha</th><th style='width:90px'>Versi&oacute;n</th><th style='width:110px'>Autor</th><th>Archivos afectados (del filtro)</th><th>Descripci&oacute;n</th></tr>$nl")
     foreach ($e in $matched) {
         $vs = @($e.Versiones)
         $vsTxt = '&mdash;'
@@ -1199,10 +1250,28 @@ a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
         }
     }
 
+    $zipGenerado = ''
+    $zipError = $null
+    if ($ExportarZip) {
+        if ($null -ne $OnProgress) { & $OnProgress $matched.Count ([Math]::Max(1,$matched.Count)) 'Comprimiendo salida (ZIP)...' }
+        $zipPath = [System.IO.Path]::ChangeExtension($rutaSalida, '.zip')
+        try {
+            if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+            $rutasZip = @($rutaSalida)
+            if ($pdfGenerado -ne '' -and (Test-Path -LiteralPath $pdfGenerado)) { $rutasZip += $pdfGenerado }
+            Compress-Archive -LiteralPath $rutasZip -DestinationPath $zipPath -Force
+            $zipGenerado = $zipPath
+        } catch {
+            $zipError = $_.Exception.Message
+        }
+    }
+
     return New-Object PSObject -Property @{
         Salida     = $rutaSalida
         SalidaPdf  = $pdfGenerado
         PdfError   = $pdfError
+        SalidaZip  = $zipGenerado
+        ZipError   = $zipError
         Revisiones = $matched.Count
         Archivos   = $totArchivos
         Bloques    = $totHunks
@@ -1227,8 +1296,12 @@ function Show-ReportGui {
     $ttResumen = "Agrega a cada archivo un resumen del cambio generado localmente con reglas de texto (expresiones regulares):`r`nlineas agregadas/eliminadas, funciones nuevas o eliminadas, llamadas nuevas y temas detectados.`r`nNo usa IA ni servicios externos: el resultado es determinista."
     $ttSalida = "Ruta del archivo HTML a generar.`r`nVacio = se crea automaticamente en el Escritorio."
     $ttAutor = "Nombre que aparecera como Autor en la portada del reporte.`r`nSe recuerda para la proxima ejecucion."
+    $ttOrden = "Orden de las revisiones en el reporte, por fecha.`r`nDentro del HTML tambien puedes cambiarlo con el boton 'Invertir orden'."
+    $ttExclRel = "Omite los commits generados por el maven-release-plugin al hacer el release:`r`nmensajes '[maven-release-plugin] prepare release ...'."
+    $ttExclPrep = "Omite los commits del maven-release-plugin que saltan a la siguiente version SNAPSHOT:`r`nmensajes '[maven-release-plugin] prepare for next development iteration'."
     $ttAbrir = "Al terminar, abre el PDF (si se exporto) o el HTML."
     $ttPdf = "Ademas del HTML, genera un PDF en hoja apaisada.`r`nUsa Microsoft Edge incluido en Windows 10/11 en modo oculto.`r`nSi Edge no esta disponible, el HTML se genera igual y se muestra un aviso."
+    $ttZip = "Genera un archivo .zip junto a la salida, con el HTML y (si se exporto) el PDF.`r`nUtil para adjuntar o compartir el reporte completo."
     $ttEstado = 'Requisito: svn.exe (repos SVN) y/o git.exe (repos Git) en el PATH.'
 
     if (-not ('RepGui.Native' -as [type])) {
@@ -1250,7 +1323,7 @@ function Show-ReportGui {
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Reporte de cambios SVN por modulo'
-    $f.Size = New-Object System.Drawing.Size(720, 623)
+    $f.Size = New-Object System.Drawing.Size(720, 679)
     $f.FormBorderStyle = 'FixedDialog'
     $f.MaximizeBox = $false
     $f.StartPosition = 'CenterScreen'
@@ -1345,6 +1418,8 @@ function Show-ReportGui {
     $y += 38
     $lAutor = New-Lbl 'Autor del reporte:' 15 $y 280
     $f.Controls.Add($lAutor)
+    $lOrden = New-Lbl 'Orden de revisiones:' 320 $y 280
+    $f.Controls.Add($lOrden)
     $y += 20
     $txtAutor = New-Object System.Windows.Forms.TextBox
     $txtAutor.Location = New-Object System.Drawing.Point(15, $y); $txtAutor.Size = New-Object System.Drawing.Size(280, 23)
@@ -1352,6 +1427,27 @@ function Show-ReportGui {
     $tips.SetToolTip($lAutor, $ttAutor)
     $tips.SetToolTip($txtAutor, $ttAutor)
     Set-Cue $txtAutor 'Nombre de quien genera el reporte'
+    $cboOrden = New-Object System.Windows.Forms.ComboBox
+    $cboOrden.Location = New-Object System.Drawing.Point(320, $y); $cboOrden.Size = New-Object System.Drawing.Size(280, 23)
+    $cboOrden.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    [void]$cboOrden.Items.Add('Mas antiguas primero (ascendente)')
+    [void]$cboOrden.Items.Add('Mas recientes primero (descendente)')
+    $cboOrden.SelectedIndex = 0
+    $f.Controls.Add($cboOrden)
+    $tips.SetToolTip($lOrden, $ttOrden)
+    $tips.SetToolTip($cboOrden, $ttOrden)
+
+    $y += 28
+    $chkExclRel = New-Object System.Windows.Forms.CheckBox
+    $chkExclRel.Text = 'Excluir commits de mvn release'
+    $chkExclRel.Location = New-Object System.Drawing.Point(15, $y); $chkExclRel.Size = New-Object System.Drawing.Size(300, 23)
+    $f.Controls.Add($chkExclRel)
+    $tips.SetToolTip($chkExclRel, $ttExclRel)
+    $chkExclPrep = New-Object System.Windows.Forms.CheckBox
+    $chkExclPrep.Text = 'Excluir commits de mvn prepare'
+    $chkExclPrep.Location = New-Object System.Drawing.Point(320, $y); $chkExclPrep.Size = New-Object System.Drawing.Size(370, 23)
+    $f.Controls.Add($chkExclPrep)
+    $tips.SetToolTip($chkExclPrep, $ttExclPrep)
 
     $y += 38
     $lSalida = New-Lbl 'Archivo de salida:' 15 $y 500
@@ -1380,6 +1476,13 @@ function Show-ReportGui {
     $chkPdf.Location = New-Object System.Drawing.Point(320, $y); $chkPdf.Size = New-Object System.Drawing.Size(370, 23)
     $f.Controls.Add($chkPdf)
     $tips.SetToolTip($chkPdf, $ttPdf)
+
+    $y += 28
+    $chkZip = New-Object System.Windows.Forms.CheckBox
+    $chkZip.Text = 'Comprimir salida en ZIP (HTML + PDF)'
+    $chkZip.Location = New-Object System.Drawing.Point(15, $y); $chkZip.Size = New-Object System.Drawing.Size(300, 23)
+    $f.Controls.Add($chkZip)
+    $tips.SetToolTip($chkZip, $ttZip)
 
     $y += 32
     $pb = New-Object System.Windows.Forms.ProgressBar
@@ -1431,6 +1534,10 @@ function Show-ReportGui {
                 ('extensiones=' + $txtExts.Text.Trim()),
                 ('salida=' + $txtSalida.Text.Trim()),
                 ('autor=' + $txtAutor.Text.Trim()),
+                ('orden=' + $(if ($cboOrden.SelectedIndex -eq 1) { 'desc' } else { 'asc' })),
+                ('exclrelease=' + $(if ($chkExclRel.Checked) { '1' } else { '0' })),
+                ('exclprepare=' + $(if ($chkExclPrep.Checked) { '1' } else { '0' })),
+                ('zip=' + $(if ($chkZip.Checked) { '1' } else { '0' })),
                 ('resumen=' + $(if ($chkResumen.Checked) { '1' } else { '0' })),
                 ('abrir=' + $(if ($chkAbrir.Checked) { '1' } else { '0' })),
                 ('pdf=' + $(if ($chkPdf.Checked) { '1' } else { '0' }))
@@ -1453,6 +1560,10 @@ function Show-ReportGui {
             if ($cfg.ContainsKey('extensiones')) { $txtExts.Text = $cfg['extensiones'] }
             if ($cfg.ContainsKey('salida')) { $txtSalida.Text = $cfg['salida'] }
             if ($cfg.ContainsKey('autor')) { $txtAutor.Text = $cfg['autor'] }
+            if ($cfg.ContainsKey('orden')) { if ($cfg['orden'] -eq 'desc') { $cboOrden.SelectedIndex = 1 } else { $cboOrden.SelectedIndex = 0 } }
+            if ($cfg.ContainsKey('exclrelease')) { $chkExclRel.Checked = ($cfg['exclrelease'] -eq '1') }
+            if ($cfg.ContainsKey('exclprepare')) { $chkExclPrep.Checked = ($cfg['exclprepare'] -eq '1') }
+            if ($cfg.ContainsKey('zip')) { $chkZip.Checked = ($cfg['zip'] -eq '1') }
             if ($cfg.ContainsKey('resumen')) { $chkResumen.Checked = ($cfg['resumen'] -ne '0') }
             if ($cfg.ContainsKey('abrir')) { $chkAbrir.Checked = ($cfg['abrir'] -ne '0') }
             if ($cfg.ContainsKey('pdf')) { $chkPdf.Checked = ($cfg['pdf'] -eq '1') }
@@ -1479,6 +1590,10 @@ function Show-ReportGui {
                 -IncluirResumen $chkResumen.Checked `
                 -ExportarPdf $chkPdf.Checked `
                 -AutorReporte $txtAutor.Text.Trim() `
+                -OrdenRev $(if ($cboOrden.SelectedIndex -eq 1) { 'desc' } else { 'asc' }) `
+                -ExclMvnRelease $chkExclRel.Checked `
+                -ExclMvnPrepare $chkExclPrep.Checked `
+                -ExportarZip $chkZip.Checked `
                 -OnProgress {
                     param($i, $t, $m)
                     if ($t -gt 0) { $pb.Value = [Math]::Min(100, [int](100 * $i / $t)) }
@@ -1495,9 +1610,13 @@ function Show-ReportGui {
                         'Bloques de cambio: ' + $res.Bloques + [Environment]::NewLine + [Environment]::NewLine +
                         $res.Salida)
             if ($res.SalidaPdf -ne '') { $detalle += [Environment]::NewLine + 'PDF: ' + $res.SalidaPdf }
+            if ($res.SalidaZip -ne '') { $detalle += [Environment]::NewLine + 'ZIP: ' + $res.SalidaZip }
             [void][System.Windows.Forms.MessageBox]::Show($f, $detalle, 'Reporte SVN', 'OK', 'Information')
             if ($null -ne $res.PdfError) {
                 [void][System.Windows.Forms.MessageBox]::Show($f, ('El HTML se genero correctamente, pero fallo la exportacion a PDF:' + [Environment]::NewLine + $res.PdfError), 'PDF', 'OK', 'Warning')
+            }
+            if ($null -ne $res.ZipError) {
+                [void][System.Windows.Forms.MessageBox]::Show($f, ('El reporte se genero, pero fallo la creacion del ZIP:' + [Environment]::NewLine + $res.ZipError), 'ZIP', 'OK', 'Warning')
             }
             if ($chkAbrir.Checked) {
                 $abrir = $res.Salida
@@ -1552,6 +1671,10 @@ $resultado = New-SvnChangeReport `
     -RutaPdf $SalidaPdf `
     -AutorReporte $Autor `
     -Vcs $Vcs `
+    -OrdenRev $Orden `
+    -ExclMvnRelease $ExcluirMvnRelease.IsPresent `
+    -ExclMvnPrepare $ExcluirMvnPrepare.IsPresent `
+    -ExportarZip $Zip.IsPresent `
     -OnProgress {
         param($i, $t, $m)
         $pct = 0
@@ -1566,6 +1689,8 @@ Write-Host ('Archivos con diff: ' + $resultado.Archivos)
 Write-Host ('Bloques de cambio: ' + $resultado.Bloques)
 if ($resultado.SalidaPdf -ne '') { Write-Host ('PDF generado     : ' + $resultado.SalidaPdf) }
 if ($null -ne $resultado.PdfError) { Write-Host ('ADVERTENCIA PDF  : ' + $resultado.PdfError) }
+if ($resultado.SalidaZip -ne '') { Write-Host ('ZIP generado     : ' + $resultado.SalidaZip) }
+if ($null -ne $resultado.ZipError) { Write-Host ('ADVERTENCIA ZIP  : ' + $resultado.ZipError) }
 if (@($resultado.SinCambios).Count -gt 0) {
     Write-Host ('Sin cambios      : ' + ($resultado.SinCambios -join ', '))
 }

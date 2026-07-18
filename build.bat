@@ -16,6 +16,7 @@ if not exist "%CSC%" (
     /win32icon:"%~dp0ReporteCambiosSVN.ico" ^
     /r:System.dll /r:System.Core.dll /r:System.Xml.dll ^
     /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
+    /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll ^
     "%~dp0ReporteCambiosSVN.cs"
 if errorlevel 1 (
     echo ERROR de compilacion.
