@@ -1,10 +1,18 @@
 @echo off
 rem ============================================================
-rem  Compila ReporteCambios.exe usando el compilador C# que
-rem  viene incluido en Windows (.NET Framework 4.x).
-rem  No requiere Visual Studio ni ninguna instalacion adicional.
+rem  build.bat - Compila ReporteCambios.exe
+rem  No requiere Visual Studio ni instalacion adicional.
+rem  Output: build\ReporteCambios.exe
 rem ============================================================
+cd /d "%~dp0"
 setlocal
+
+rem --- Limpiar build anterior ---
+if exist "build\" rmdir /s /q "build\"
+
+rem --- Crear directorio de salida ---
+if not exist "build\" mkdir "build\"
+
 set CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe
 if not exist "%CSC%" set CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe
 if not exist "%CSC%" (
@@ -12,7 +20,7 @@ if not exist "%CSC%" (
     exit /b 1
 )
 "%CSC%" /nologo /optimize+ /target:winexe /platform:anycpu ^
-    /out:"%~dp0ReporteCambios.exe" ^
+    /out:"%~dp0build\ReporteCambios.exe" ^
     /win32icon:"%~dp0ReporteCambiosSVN.ico" ^
     /r:System.dll /r:System.Core.dll /r:System.Xml.dll ^
     /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
@@ -22,4 +30,4 @@ if errorlevel 1 (
     echo ERROR de compilacion.
     exit /b 1
 )
-echo OK: %~dp0ReporteCambios.exe generado.
+echo OK: %~dp0build\ReporteCambios.exe generado.

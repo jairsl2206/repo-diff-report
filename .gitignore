@@ -2,7 +2,11 @@
 *.exe
 *.pdb
 
+# Carpeta de compilacion
+build/
+
 # Releases generadas
+release/
 *.zip
 
 # Salidas de reportes
