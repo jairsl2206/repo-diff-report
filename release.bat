@@ -84,8 +84,8 @@ if errorlevel 1 (
 rem --- GitHub Release ---
 echo.
 echo === Publicando release en GitHub ===
-set "NOTAS=%TEMP%\release_notes_%VER%.txt"
-powershell -NoProfile -Command "git log -1 --pretty=format:'## Cambios en v%VER%%n%n%B' | Out-File -FilePath '%NOTAS%' -Encoding UTF8"
+set "NOTAS=%TEMP%\rn_%VER%.txt"
+powershell -NoProfile -Command "& { $out = git log -1 --pretty=format:'## Cambios en v%VER%%n%n%B'; [IO.File]::WriteAllText('%NOTAS%', $out, [Text.Encoding]::UTF8) }"
 
 set "GH_REPO=jairsl2206/repo-diff-report"
 
