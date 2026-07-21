@@ -85,7 +85,7 @@ rem --- GitHub Release ---
 echo.
 echo === Publicando release en GitHub ===
 set "NOTAS=%TEMP%\release_notes_%VER%.txt"
-git log -1 --pretty=format:"## Cambios en v%VER%%n%n%B" > "%NOTAS%"
+powershell -NoProfile -Command "git log -1 --pretty=format:'## Cambios en v%VER%%n%n%B' | Out-File -FilePath '%NOTAS%' -Encoding UTF8"
 
 set "GH_REPO=jairsl2206/repo-diff-report"
 
@@ -100,7 +100,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-gh release create "v%VER%" "%EXE%" "%ZIP%" ^
+rem --- gh CLI: crear release ---
+set "GH_ASSETS=%EXE%"
+if exist "%ZIP%" set "GH_ASSETS=%EXE% %ZIP%"
+gh release create "v%VER%" %GH_ASSETS% ^
     --repo "%GH_REPO%" ^
     --title "v%VER%" ^
     --notes-file "%NOTAS%" ^
