@@ -69,7 +69,7 @@ if exist "%RELEASE%" rmdir /s /q "%RELEASE%"
 mkdir "%RELEASE%"
 
 copy /y "%BUILD_EXE%" "%RELEASE%\ReporteCambios.exe" >nul
-if exist "%~dp0logo-napse-totvs.png" copy /y "%~dp0logo-napse-totvs.png" "%RELEASE%\" >nul
+if exist "%~dp0imagen.png" copy /y "%~dp0imagen.png" "%RELEASE%\" >nul
 if exist "%~dp0README.md"             copy /y "%~dp0README.md"             "%RELEASE%\" >nul
 echo Artefactos copiados a %RELEASE%
 

@@ -672,7 +672,7 @@ namespace ReporteCambiosSvn
             try
             {
                 string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-                string logoPath = System.IO.Path.Combine(exeDir, "logo-napse-totvs.png");
+                string logoPath = System.IO.Path.Combine(exeDir, "imagen.png");
                 if (File.Exists(logoPath))
                     return Convert.ToBase64String(File.ReadAllBytes(logoPath));
             }
@@ -689,7 +689,7 @@ body{font-family:Verdana,'Segoe UI',Arial,sans-serif;margin:0;padding:0;backgrou
 .cover-page{position:relative;z-index:200;background:#002233;min-height:100vh;display:flex;align-items:center;justify-content:center;page-break-after:always}
 .cover-inner{text-align:center;padding:35px 40px 50px 40px;max-width:820px}
 .cover-badge{display:inline-block;background:#FF8900;color:#fff;font-weight:700;font-size:14px;letter-spacing:5px;padding:8px 28px;border-radius:4px;margin-bottom:32px;text-transform:uppercase}
-.cover-logo{height:72px;width:auto;margin-bottom:8px;vertical-align:middle}
+.cover-logo{display:block;height:72px;width:auto;margin:0 auto 8px auto;vertical-align:middle}
 .cover-title{font-size:29px;font-weight:700;color:#fff;margin:0 0 8px 0;line-height:1.2}
 .cover-subtitle{font-size:13px;font-weight:400;color:#00DBFF;margin:0 0 32px 0}
 table.cinfo{margin:0 auto;border-collapse:collapse;font-size:12px;text-align:left}
@@ -763,9 +763,8 @@ a{color:#004D6B;text-decoration:none} a:hover{text-decoration:underline;color:#0
             string modsTxt = mods.Count > 0 ? Texto.E(string.Join(", ", mods)) : "(todos los archivos)";
             string autorTxt = (opt.Autor ?? "").Trim().Length > 0 ? Texto.E(opt.Autor.Trim()) : "&mdash;";
             sb.Append("<div class='cover-page'><div class='cover-inner'>" + nl);
+            sb.Append("<img class='cover-logo' src='data:image/png;base64," + GetLogoBase64() + "' alt='imagen'>" + nl);
             sb.Append("<div class='cover-badge'>CONFIDENCIAL</div>" + nl);
-            sb.Append("<img class='cover-logo' src='data:image/png;base64," + GetLogoBase64() + "' alt='Napse ahora es TOTVS'>" + nl);
-            sb.Append("<img class='cover-logo' src='data:image/png;base64," + IconoB64 + "' alt='TOTVS'>" + nl);
             sb.Append("<h1 class='cover-title'>Reporte de Cambios por Archivo</h1>" + nl);
             sb.Append("<p class='cover-subtitle'>Control de cambios sobre repositorio " + vcsNombre + "</p>" + nl);
             sb.Append("<table class='cinfo'>" + nl);

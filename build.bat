@@ -21,7 +21,7 @@ if not exist "%CSC%" (
 )
 "%CSC%" /nologo /optimize+ /target:winexe /platform:anycpu ^
     /out:"%~dp0build\ReporteCambios.exe" ^
-    /win32icon:"%~dp0ReporteCambiosSVN.ico" ^
+    /win32icon:"%~dp0imagen-icono.ico" ^
     /r:System.dll /r:System.Core.dll /r:System.Xml.dll ^
     /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
     /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll ^
@@ -30,4 +30,5 @@ if errorlevel 1 (
     echo ERROR de compilacion.
     exit /b 1
 )
+if exist "%~dp0imagen.png" copy /y "%~dp0imagen.png" "%~dp0build\" >nul
 echo OK: %~dp0build\ReporteCambios.exe generado.
