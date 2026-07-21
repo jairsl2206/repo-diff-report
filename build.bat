@@ -1,6 +1,6 @@
 @echo off
 rem ============================================================
-rem  Compila ReporteCambiosSVN.exe usando el compilador C# que
+rem  Compila ReporteCambios.exe usando el compilador C# que
 rem  viene incluido en Windows (.NET Framework 4.x).
 rem  No requiere Visual Studio ni ninguna instalacion adicional.
 rem ============================================================
@@ -12,14 +12,14 @@ if not exist "%CSC%" (
     exit /b 1
 )
 "%CSC%" /nologo /optimize+ /target:winexe /platform:anycpu ^
-    /out:"%~dp0ReporteCambiosSVN.exe" ^
+    /out:"%~dp0ReporteCambios.exe" ^
     /win32icon:"%~dp0ReporteCambiosSVN.ico" ^
     /r:System.dll /r:System.Core.dll /r:System.Xml.dll ^
     /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
     /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll ^
-    "%~dp0ReporteCambiosSVN.cs"
+    "%~dp0src\Models.cs" "%~dp0src\Utils.cs" "%~dp0src\PdfExport.cs" "%~dp0src\Engine.cs" "%~dp0src\Gui.cs"
 if errorlevel 1 (
     echo ERROR de compilacion.
     exit /b 1
 )
-echo OK: %~dp0ReporteCambiosSVN.exe generado.
+echo OK: %~dp0ReporteCambios.exe generado.

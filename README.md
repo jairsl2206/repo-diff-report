@@ -24,12 +24,12 @@ Herramienta portable para Windows que genera reportes HTML/PDF de cambios por ar
 
 ## Uso
 
-**Interfaz gráfica** — doble clic en `ReporteCambiosSVN.exe`.
+**Interfaz gráfica** — doble clic en `ReporteCambios.exe`.
 
 **Consola:**
 
 ```bat
-ReporteCambiosSVN.exe -ProjectPath <url|carpeta> -Desde <fecha|rev> ^
+ReporteCambios.exe -ProjectPath <url|carpeta> -Desde <fecha|rev> ^
     [-Hasta <fecha|rev|HEAD>] [-Archivos "ARCH1,ARCH2"] [-Extensiones "BAS,DAT"] ^
     [-Salida reporte.html] [-SinResumen] [-AbrirAlTerminar] [-Pdf] [-SalidaPdf reporte.pdf] ^
     [-Autor "Nombre"] [-Vcs auto|svn|git] [-Orden asc|desc] [-ExcluirMvnRelease] [-ExcluirMvnPrepare] [-Zip]
@@ -40,15 +40,20 @@ Notas: `-Modulos` se acepta como alias de `-Archivos`. Sin `-Archivos` y/o sin `
 Ejemplo:
 
 ```bat
-ReporteCambiosSVN.exe -ProjectPath "https://servidor/svn/repo/trunk" ^
+ReporteCambios.exe -ProjectPath "https://servidor/svn/repo/trunk" ^
     -Desde 2025-08-01 -Hasta HEAD -Archivos "SUBTSPAG,USRTTLOG,USRTDUMP" -Extensiones "BAS,DAT" -Pdf
 ```
 
 ## Compilación
 
-No requiere Visual Studio: `build.bat` compila con `csc.exe` del .NET Framework incluido en Windows.
+No requiere Visual Studio: `build.bat` compila todos los `.cs` con `csc.exe` del .NET Framework incluido en Windows.
 
-También se incluye la variante en PowerShell puro (`ReporteCambiosSVN.ps1` + lanzador `ReporteCambiosSVN.bat`) con la misma funcionalidad.
+Estructura del código fuente (modular):
+- `Models.cs` — Modelos de datos y enums
+- `Utils.cs` — Ejecución de procesos, wrappers SVN/Git, encoding de texto
+- `PdfExport.cs` — Exportación a PDF via Microsoft Edge headless
+- `Engine.cs` — Motor principal: logs, diffs, heurísticas, generación HTML
+- `Gui.cs` — Interfaz gráfica WinForms + entry point (gui/cli)
 
 ## Roadmap
 
