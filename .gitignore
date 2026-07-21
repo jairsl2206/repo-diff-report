@@ -1,6 +1,9 @@
-# Binarios compilados (se distribuyen via Releases)
+# Binarios compilados
 *.exe
 *.pdb
+
+# Releases generadas
+*.zip
 
 # Salidas de reportes
 *.html
