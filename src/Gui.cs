@@ -23,7 +23,7 @@ namespace ReporteCambiosSvn
 {
     internal class MainForm : Form
     {
-        private const string TtProj = "URL del repositorio SVN (https://...), carpeta de un working copy SVN\r\no carpeta local de un repositorio Git (clonado). Se detecta automaticamente.\r\nEjemplo: https://servidor/svn/repo/trunk  |  C:\\repos\\mi-proyecto";
+        private const string TtProj = "URL del repositorio remoto (SVN: https://..., Git: git@... o https://...git)\r\no carpeta local de un working copy SVN / repositorio Git clonado.\r\nSe detecta automaticamente el tipo de repositorio.\r\nGit remoto: requiere acceso SSH/HTTPS configurado en su equipo.\r\nSi selecciona una carpeta local, se extraera automaticamente la URL del repositorio remoto.\r\nEjemplo SVN: https://servidor/svn/repo/trunk\r\nEjemplo Git:  git@github.com:usuario/repo.git  |  C:\\repos\\mi-proyecto";
         private const string TtDesde = "Inicio del rango a analizar.\r\nSVN: fecha (YYYY-MM-DD) o numero de revision.\r\nGit: fecha o commit/tag (el commit inicial no se incluye: rango desde..hasta).\r\nEjemplos: 2025-08-01  |  31490  |  1f95ed4";
         private const string TtHasta = "Fin del rango a analizar.\r\nSVN: fecha, numero de revision o HEAD.\r\nGit: fecha, commit/tag o HEAD.";
         private const string TtArchivos = "Nombres de los archivos a identificar, separados por coma (sin ruta).\r\nEjemplo: SUBTSPAG,USRTTLOG,USRTDUMP\r\nVacio = se incluyen TODOS los archivos modificados.\r\nSe combinan con Extensiones; si escribe el nombre con extension (ej. VENTAS.BAS), deje Extensiones vacio.";
@@ -37,11 +37,11 @@ namespace ReporteCambiosSvn
         private const string TtEstado = "Requisito: svn.exe (repos SVN) y/o git.exe (repos Git) en el PATH.";
 
         private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor;
-        private ComboBox cboOrden;
+        private ComboBox cboOrden, cboBranch;
         private CheckBox chkResumen, chkExclRel, chkExclPrep;
         private ProgressBar pb;
         private Label lblEstado;
-        private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida;
+        private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida, btnBranch;
         private BackgroundWorker bw;
         private ToolTip tips;
         private const string PhArchivos = "Vacio = todos los archivos. Ej: SUBTSPAG,USRTTLOG,USRTDUMP";
@@ -105,6 +105,7 @@ namespace ReporteCambiosSvn
                     "salida=" + txtSalida.Text.Trim(),
                     "autor=" + txtAutor.Text.Trim(),
                     "orden=" + (cboOrden.SelectedIndex == 1 ? "desc" : "asc"),
+                    "branch=" + (cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : ""),
                     "exclrelease=" + (chkExclRel.Checked ? "1" : "0"),
                     "exclprepare=" + (chkExclPrep.Checked ? "1" : "0"),
                     "resumen=" + (chkResumen.Checked ? "1" : "0")
@@ -134,6 +135,11 @@ namespace ReporteCambiosSvn
                 if (cfg.TryGetValue("salida", out v)) txtSalida.Text = v;
                 if (cfg.TryGetValue("autor", out v)) txtAutor.Text = v;
                 if (cfg.TryGetValue("orden", out v)) cboOrden.SelectedIndex = v == "desc" ? 1 : 0;
+                if (cfg.TryGetValue("branch", out v) && v.Trim().Length > 0)
+                {
+                    if (cboBranch.Items.Count == 0) cboBranch.Items.Add(v);
+                    cboBranch.SelectedItem = v;
+                }
                 if (cfg.TryGetValue("exclrelease", out v)) chkExclRel.Checked = v == "1";
                 if (cfg.TryGetValue("exclprepare", out v)) chkExclPrep.Checked = v == "1";
                 if (cfg.TryGetValue("resumen", out v)) chkResumen.Checked = v != "0";
@@ -144,7 +150,7 @@ namespace ReporteCambiosSvn
         public MainForm()
         {
             Text = "Reporte de cambios por modulo";
-            ClientSize = new Size(704, 580);
+            ClientSize = new Size(704, 630);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -157,15 +163,43 @@ namespace ReporteCambiosSvn
             tips.ReshowDelay = 100;
 
             int y = 15;
-            var lProj = AddLbl("Proyecto SVN:", 15, y, 500);
+            var lProj = AddLbl("URL de repositorio remoto:", 15, y, 500);
             y += 20;
             txtProj = AddTxt(15, y, 580);
             btnDir = AddBtn("Carpeta...", 605, y - 1, 85, 25);
             btnDir.Click += BtnDir_Click;
             tips.SetToolTip(lProj, TtProj);
             tips.SetToolTip(txtProj, TtProj);
-            tips.SetToolTip(btnDir, "Seleccionar la carpeta de un working copy local.");
-            SetPlaceholder(txtProj, "https://servidor/svn/repo/trunk  o  C:\\ruta\\repo (SVN o Git)");
+            tips.SetToolTip(btnDir, "Seleccionar la carpeta de un working copy local (SVN o Git).");
+            SetPlaceholder(txtProj, "https://servidor/svn/repo/trunk  |  git@github.com:user/repo.git  |  C:\\ruta\\repo");
+
+            y += 30;
+            var lBranch = AddLbl("Rama:", 15, y, 100);
+            y += 20;
+            cboBranch = new ComboBox();
+            cboBranch.Location = new Point(15, y);
+            cboBranch.Size = new Size(280, 23);
+            cboBranch.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboBranch.Items.Add("trunk");
+            cboBranch.SelectedIndex = 0;
+            Controls.Add(cboBranch);
+            btnBranch = AddBtn("Actualizar ramas", 305, y - 1, 120, 25);
+            btnBranch.Click += BtnBranch_Click;
+            tips.SetToolTip(lBranch, "Rama del repositorio a analizar. Use 'Actualizar ramas' para cargar la lista desde el repositorio.");
+            tips.SetToolTip(cboBranch, "Rama del repositorio a analizar. En SVN, 'trunk' es la rama principal.");
+            tips.SetToolTip(btnBranch, "Consultar al repositorio remoto la lista de ramas disponibles.");
+            var lblBranchStatus = new Label();
+            lblBranchStatus.Location = new Point(435, y + 2);
+            lblBranchStatus.Size = new Size(250, 18);
+            lblBranchStatus.AutoSize = false;
+            lblBranchStatus.ForeColor = Color.Gray;
+            Controls.Add(lblBranchStatus);
+            lblBranchStatus.Name = "lblBranchStatus";
+            txtProj.TextChanged += delegate
+            {
+                var s = Controls.Find("lblBranchStatus", true);
+                if (s.Length > 0) s[0].Text = "Use 'Actualizar ramas' para cargar las ramas del repositorio.";
+            };
 
             y += 38;
             var lDesde = AddLbl("Desde:", 15, y, 280);
@@ -319,8 +353,64 @@ namespace ReporteCambiosSvn
         {
             using (var dlg = new FolderBrowserDialog())
             {
-                dlg.Description = "Seleccione la carpeta del working copy SVN";
-                if (dlg.ShowDialog(this) == DialogResult.OK) txtProj.Text = dlg.SelectedPath;
+                dlg.Description = "Seleccione la carpeta del repositorio local (SVN o Git)";
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    txtProj.Text = dlg.SelectedPath;
+                    CargarRamas();
+                }
+            }
+        }
+
+        private void BtnBranch_Click(object sender, EventArgs e)
+        {
+            CargarRamas();
+        }
+
+        private void CargarRamas()
+        {
+            string proyecto = txtProj.Text.Trim();
+            if (proyecto.Length == 0)
+            {
+                var status = Controls.Find("lblBranchStatus", true);
+                if (status.Length > 0) status[0].Text = "Primero indique la URL o carpeta del proyecto.";
+                return;
+            }
+            var statusLbl = Controls.Find("lblBranchStatus", true);
+            if (statusLbl.Length > 0) statusLbl[0].Text = "Consultando ramas...";
+            cboBranch.Enabled = false;
+            try
+            {
+                var ramas = Engine.ListarRamas(proyecto, "auto");
+                string anterior = cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : "";
+                cboBranch.Items.Clear();
+                if (ramas.Count == 0)
+                {
+                    cboBranch.Items.Add("trunk");
+                    cboBranch.SelectedIndex = 0;
+                    if (statusLbl.Length > 0) statusLbl[0].Text = "Sin ramas detectadas. Usando trunk.";
+                }
+                else
+                {
+                    foreach (var r in ramas) cboBranch.Items.Add(r);
+                    int idx = -1;
+                    if (anterior.Length > 0)
+                    {
+                        for (int i = 0; i < cboBranch.Items.Count; i++)
+                            if (string.Equals(cboBranch.Items[i].ToString(), anterior, StringComparison.OrdinalIgnoreCase))
+                            { idx = i; break; }
+                    }
+                    cboBranch.SelectedIndex = idx >= 0 ? idx : 0;
+                    if (statusLbl.Length > 0) statusLbl[0].Text = ramas.Count + " rama(s) encontrada(s).";
+                }
+            }
+            catch (Exception ex)
+            {
+                if (statusLbl.Length > 0) statusLbl[0].Text = "Error: " + ex.Message;
+            }
+            finally
+            {
+                cboBranch.Enabled = true;
             }
         }
 
@@ -344,7 +434,7 @@ namespace ReporteCambiosSvn
         {
             try
             {
-                if (txtProj.Text.Trim().Length == 0) throw new ArgumentException("Indique la URL o carpeta del proyecto (SVN o Git).");
+                if (txtProj.Text.Trim().Length == 0) throw new ArgumentException("Indique la URL remota o carpeta local del proyecto (SVN o Git).");
                 if (txtDesde.Text.Trim().Length == 0) throw new ArgumentException("Indique el valor \"Desde\" (fecha o revision).");
 
                 var opt = new ReportOptions();
@@ -359,6 +449,7 @@ namespace ReporteCambiosSvn
                 opt.ExcluirMvnRelease = chkExclRel.Checked;
                 opt.ExcluirMvnPrepare = chkExclPrep.Checked;
                 opt.IncluirResumen = chkResumen.Checked;
+                opt.Branch = cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : "";
 
                 GuardarConfig();
                 SetBusy(true);
@@ -379,9 +470,9 @@ namespace ReporteCambiosSvn
             txtProj.Enabled = !busy; txtDesde.Enabled = !busy; txtHasta.Enabled = !busy;
             txtMods.Enabled = !busy; txtExts.Enabled = !busy; txtSalida.Enabled = !busy;
             txtAutor.Enabled = !busy;
-            cboOrden.Enabled = !busy;
+            cboOrden.Enabled = !busy; cboBranch.Enabled = !busy;
             chkExclRel.Enabled = !busy; chkExclPrep.Enabled = !busy;
-            btnDir.Enabled = !busy; btnSalida.Enabled = !busy;
+            btnDir.Enabled = !busy; btnSalida.Enabled = !busy; btnBranch.Enabled = !busy;
             chkResumen.Enabled = !busy;
         }
 
@@ -598,11 +689,12 @@ namespace ReporteCambiosSvn
                    "      [-Hasta <fecha|rev|HEAD>] [-Archivos \"A,B,C\"] [-Extensiones \"BAS,DAT\"]\r\n" +
                    "      [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]\r\n" +
                    "      [-Autor \"Nombre\"] [-Vcs auto|svn|git] [-Orden asc|desc]\r\n" +
-                   "      [-ExcluirMvnRelease] [-ExcluirMvnPrepare]\r\n" +
+                   "      [-Branch <rama>] [-ExcluirMvnRelease] [-ExcluirMvnPrepare]\r\n" +
                    "Notas: -Modulos es alias de -Archivos. Sin -Archivos y/o sin -Extensiones\r\n" +
                    "       se incluyen TODOS los archivos / cualquier extension.\r\n" +
-                   "       SVN: URL o working copy. Git: carpeta local del repositorio clonado\r\n" +
-                   "       (en Git el rango de commits es desde..hasta, exclusivo del inicial).\r\n" +
+                   "       Soporta SVN (URL o working copy) y Git (URL remota git@... o carpeta local).\r\n" +
+                   "       Git remoto requiere acceso SSH/HTTPS configurado en su equipo.\r\n" +
+                   "       Si usa carpeta local, se extrae la URL del repositorio remoto automaticamente.\r\n" +
                    "Dependencias: svn.exe y/o git.exe en el PATH. PDF/ZIP disponibles desde la GUI.";
         }
 
@@ -621,6 +713,7 @@ namespace ReporteCambiosSvn
                 else if (a == "-autor") opt.Autor = Next(args, ref i, a);
                 else if (a == "-vcs") opt.Vcs = Next(args, ref i, a);
                 else if (a == "-orden") opt.Orden = Next(args, ref i, a);
+                else if (a == "-branch") opt.Branch = Next(args, ref i, a);
                 else if (a == "-excluirmvnrelease") opt.ExcluirMvnRelease = true;
                 else if (a == "-excluirmvnprepare") opt.ExcluirMvnPrepare = true;
                 else if (a == "-zip") opt.ExportarZip = true;
@@ -631,7 +724,7 @@ namespace ReporteCambiosSvn
                 else if (a == "-gui") { }
                 else throw new ArgumentException("Parametro no reconocido: " + args[i]);
             }
-            if (opt.ProjectPath.Trim().Length == 0) throw new ArgumentException("Falta -ProjectPath (URL o carpeta local del proyecto SVN).");
+            if (opt.ProjectPath.Trim().Length == 0) throw new ArgumentException("Falta -ProjectPath (URL remota o carpeta local del proyecto SVN/Git).");
             if (opt.Desde.Trim().Length == 0) throw new ArgumentException("Falta -Desde (fecha YYYY-MM-DD o revision).");
             if (opt.Hasta.Trim().Length == 0) opt.Hasta = "HEAD";
             return opt;

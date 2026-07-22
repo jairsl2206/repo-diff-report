@@ -14,6 +14,11 @@ namespace ReporteCambiosSvn
     {
         public static SvnResult Run(string exe, IEnumerable<string> args)
         {
+            return Run(exe, args, null);
+        }
+
+        public static SvnResult Run(string exe, IEnumerable<string> args, Dictionary<string, string> env)
+        {
             var psi = new ProcessStartInfo();
             psi.FileName = exe;
             var sb = new StringBuilder();
@@ -30,6 +35,11 @@ namespace ReporteCambiosSvn
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
             psi.CreateNoWindow = true;
+            if (env != null)
+            {
+                foreach (var kv in env)
+                    psi.EnvironmentVariables[kv.Key] = kv.Value;
+            }
             using (var p = Process.Start(psi))
             {
                 var errTask = Task.Run(() => p.StandardError.ReadToEnd());
@@ -53,19 +63,88 @@ namespace ReporteCambiosSvn
             try { RunRaw(new[] { "--version", "--quiet" }); return true; }
             catch { return false; }
         }
+
+        public static List<string> ListBranches(string url)
+        {
+            var res = new List<string>();
+            if (!Disponible()) return res;
+            string branchesUrl = url.TrimEnd('/') + "/branches";
+            var r = RunRaw(new[] { "ls", "--non-interactive", branchesUrl });
+            if (r.ExitCode != 0) return res;
+            string texto = Texto.DecodeBytes(r.Bytes);
+            foreach (var linea in Regex.Split(texto, "\r?\n"))
+            {
+                var t = linea.TrimEnd('/').Trim();
+                if (t.Length > 0) res.Add(t);
+            }
+            res.Sort(StringComparer.OrdinalIgnoreCase);
+            return res;
+        }
     }
 
     internal static class Git
     {
+        private static readonly Dictionary<string, string> _gitEnv = new Dictionary<string, string>
+        {
+            { "GIT_TERMINAL_PROMPT", "0" },
+            { "GIT_ASKPASS", "echo" },
+            { "GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" }
+        };
+
         public static SvnResult Run(IEnumerable<string> args)
         {
-            return Proc.Run("git", args);
+            return Proc.Run("git", args, _gitEnv);
         }
 
         public static bool Disponible()
         {
             try { Run(new[] { "--version" }); return true; }
             catch { return false; }
+        }
+
+        public static List<string> ListRemoteBranches(string remoteUrl)
+        {
+            var res = new List<string>();
+            if (!Disponible()) return res;
+            var r = Run(new[] { "ls-remote", "--heads", remoteUrl });
+            if (r.ExitCode != 0) return res;
+            string texto = Texto.DecodeBytes(r.Bytes);
+            foreach (var linea in Regex.Split(texto, "\r?\n"))
+            {
+                var parts = linea.Trim().Split('\t');
+                if (parts.Length >= 2)
+                {
+                    string refName = parts[1];
+                    string prefix = "refs/heads/";
+                    if (refName.StartsWith(prefix))
+                        res.Add(refName.Substring(prefix.Length));
+                }
+            }
+            res.Sort(StringComparer.OrdinalIgnoreCase);
+            return res;
+        }
+
+        public static List<string> ListLocalBranches(string dir)
+        {
+            var res = new List<string>();
+            if (!Disponible()) return res;
+            var r = Run(new[] { "-C", dir, "branch", "--format=%(refname:short)" });
+            if (r.ExitCode != 0) return res;
+            string texto = Texto.DecodeBytes(r.Bytes);
+            foreach (var linea in Regex.Split(texto, "\r?\n"))
+            {
+                var t = linea.Trim();
+                if (t.Length > 0) res.Add(t);
+            }
+            return res;
+        }
+
+        public static string GetCurrentBranch(string dir)
+        {
+            if (!Disponible()) return "";
+            var r = Run(new[] { "-C", dir, "rev-parse", "--abbrev-ref", "HEAD" });
+            if (r.ExitCode != 0) return "";
+            return Texto.DecodeBytes(r.Bytes).Trim();
         }
     }
 

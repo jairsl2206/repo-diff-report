@@ -12,6 +12,13 @@ namespace ReporteCambiosSvn
 {
     internal static class Engine
     {
+        private static bool EsUrlRemota(string obj)
+        {
+            return Regex.IsMatch(obj, "^[A-Za-z][A-Za-z0-9+.\\-]*://") ||
+                   Regex.IsMatch(obj, "^(git|ssh)://") ||
+                   Regex.IsMatch(obj, "^git@[^:]+:.+");
+        }
+
         public static ReportResult Generate(ReportOptions opt, Action<int, int, string> progress, Func<bool> cancelado)
         {
             if (progress == null) progress = delegate { };
@@ -26,159 +33,196 @@ namespace ReporteCambiosSvn
 
             string objetivo = (opt.ProjectPath ?? "").Trim();
             if (objetivo.Length == 0) throw new ArgumentException("Debe indicar la URL o ruta del proyecto (SVN o Git).");
-            if (!Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://") && Directory.Exists(objetivo))
+            if (!EsUrlRemota(objetivo) && Directory.Exists(objetivo))
                 objetivo = System.IO.Path.GetFullPath(objetivo);
 
             VcsKind kind = DetectarVcs(objetivo, opt.Vcs);
-            string url = "", root = "", dirGit = "";
+            string branch = (opt.Branch ?? "").Trim();
+            if (kind == VcsKind.Git && branch.Equals("trunk", StringComparison.OrdinalIgnoreCase))
+                branch = "";
+            string url = "", root = "", dirGit = "", tempCloneDir = null;
+
             if (kind == VcsKind.Svn)
             {
                 if (!Svn.Disponible())
                     throw new InvalidOperationException("No se encontro svn.exe en el PATH. Instale un cliente SVN de linea de comandos.");
                 progress(0, 1, "Consultando informacion del repositorio (SVN)...");
                 InfoXml(objetivo, out url, out root);
+                if (branch.Length > 0 && !branch.Equals("trunk", StringComparison.OrdinalIgnoreCase))
+                {
+                    string branchUrl = root.TrimEnd('/') + "/branches/" + branch;
+                    progress(0, 1, "Cambiando a rama SVN: " + branch + "...");
+                    try { InfoXml(branchUrl, out url, out root); }
+                    catch { throw new InvalidOperationException("No se pudo acceder a la rama SVN: " + branchUrl); }
+                }
             }
             else
             {
-                if (Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://"))
-                    throw new ArgumentException("Para repositorios Git indique la carpeta local del clon (no una URL).");
                 if (!Git.Disponible())
                     throw new InvalidOperationException("No se encontro git.exe en el PATH. Instale Git para Windows.");
                 progress(0, 1, "Consultando informacion del repositorio (Git)...");
-                var rt = Git.Run(new[] { "-C", objetivo, "rev-parse", "--show-toplevel" });
-                if (rt.ExitCode != 0)
-                    throw new InvalidOperationException("La carpeta no es un repositorio Git valido:\r\n" + rt.StdErr);
-                dirGit = Texto.DecodeBytes(rt.Bytes).Trim();
-                var rr = Git.Run(new[] { "-C", objetivo, "config", "--get", "remote.origin.url" });
-                string remoto = rr.ExitCode == 0 ? Texto.DecodeBytes(rr.Bytes).Trim() : "";
-                url = remoto.Length > 0 ? remoto : dirGit.Replace('\\', '/');
-            }
-
-            string modPat = string.Join("|", mods.Select(Regex.Escape));
-            string extPat = string.Join("|", exts.Select(Regex.Escape));
-            Regex patron;
-            if (mods.Count > 0 && exts.Count > 0)
-                patron = new Regex("/(" + modPat + ")\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
-            else if (mods.Count > 0)
-                patron = new Regex("/(" + modPat + ")(\\.[A-Za-z0-9]+)?$", RegexOptions.IgnoreCase);
-            else if (exts.Count > 0)
-                patron = new Regex("\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
-            else
-                patron = new Regex(".", RegexOptions.IgnoreCase);
-            var patronOtraX = new Regex("/(" + modPat + ")\\.([A-Za-z0-9]+)$", RegexOptions.IgnoreCase);
-
-            string vcsNombre = kind == VcsKind.Git ? "Git" : "SVN";
-            string prefRev = kind == VcsKind.Git ? "" : "r";
-            progress(0, 1, "Consultando log " + vcsNombre + "...");
-            List<LogEntry> entradas;
-            if (kind == VcsKind.Git)
-            {
-                entradas = GitLogEntries(dirGit, opt.Desde, opt.Hasta, patron);
-            }
-            else
-            {
-                string rango = RevExpr(opt.Desde) + ":" + RevExpr(opt.Hasta);
-                entradas = LogEntries(url, rango, patron);
-            }
-            var matched = entradas.Where(e => e.Targets.Count > 0).ToList();
-            if (opt.ExcluirMvnRelease) matched = matched.Where(e => !EsCommitMavenRelease(e.Msg)).ToList();
-            if (opt.ExcluirMvnPrepare) matched = matched.Where(e => !EsCommitMavenPrepare(e.Msg)).ToList();
-            if (orden == "desc") matched.Reverse();
-
-            var parsedPorRev = new Dictionary<string, List<KeyValuePair<string, FileDiff>>>();
-            var modCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            int totArchivos = 0, totHunks = 0, idx = 0, svnPomFallos = 0;
-
-            foreach (var e in matched)
-            {
-                idx++;
-                if (cancelado()) throw new OperationCanceledException("Operacion cancelada por el usuario.");
-                progress(idx, matched.Count, "Descargando diff " + prefRev + e.Rev + "  (" + idx + "/" + matched.Count + ")");
-
-                e.Versiones = VersionesDeMensaje(e.Msg);
-                if (e.Versiones.Count == 0)
+                if (EsUrlRemota(objetivo))
                 {
-                    string vPom = "";
-                    if (kind == VcsKind.Git)
-                        vPom = PomVersionGit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev);
-                    else if (svnPomFallos < 2)
-                    {
-                        vPom = PomVersionSvn(url, e.Rev);
-                        if (vPom.Length == 0) svnPomFallos++;
-                    }
-                    if (vPom.Length > 0) e.Versiones.Add(vPom);
-                }
-
-                string texto = kind == VcsKind.Git
-                    ? GitDiffCommit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev, e.Targets)
-                    : DiffRevision(root, e.Rev, e.Targets);
-                string errRev = null;
-                Dictionary<string, List<string>> secciones;
-                if (texto.StartsWith("@@ERROR@@"))
-                {
-                    errRev = texto.Substring(9);
-                    secciones = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                    url = objetivo;
+                    tempCloneDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RepoCambiosGit_" + Guid.NewGuid().ToString("N"));
+                    var cloneArgs = new List<string> { "clone", "--single-branch" };
+                    if (branch.Length > 0) { cloneArgs.Add("-b"); cloneArgs.Add(branch); }
+                    cloneArgs.Add(objetivo);
+                    cloneArgs.Add(tempCloneDir);
+                    var cr = Git.Run(cloneArgs);
+                    if (cr.ExitCode != 0)
+                        throw new InvalidOperationException("No se pudo clonar el repositorio Git remoto. Verifique que tiene acceso (SSH/HTTPS) y que la URL es correcta.\r\n" + cr.StdErr);
+                    dirGit = tempCloneDir;
+                    progress(0, 2, "Clon completado. Analizando repositorio Git remoto...");
                 }
                 else
                 {
-                    secciones = kind == VcsKind.Git ? SplitSeccionesGit(texto) : SplitSecciones(texto);
+                    var rt = Git.Run(new[] { "-C", objetivo, "rev-parse", "--show-toplevel" });
+                    if (rt.ExitCode != 0)
+                        throw new InvalidOperationException("La carpeta no es un repositorio Git valido:\r\n" + rt.StdErr);
+                    dirGit = Texto.DecodeBytes(rt.Bytes).Trim();
+                    var rr = Git.Run(new[] { "-C", objetivo, "config", "--get", "remote.origin.url" });
+                    string remoto = rr.ExitCode == 0 ? Texto.DecodeBytes(rr.Bytes).Trim() : "";
+                    url = remoto.Length > 0 ? remoto : dirGit.Replace('\\', '/');
                 }
+            }
 
-                var archivos = new List<KeyValuePair<string, FileDiff>>();
-                foreach (var t in e.Targets.OrderBy(x => BaseName(x.Path), StringComparer.OrdinalIgnoreCase))
+            try
+            {
+                string modPat = string.Join("|", mods.Select(Regex.Escape));
+                string extPat = string.Join("|", exts.Select(Regex.Escape));
+                Regex patron;
+                if (mods.Count > 0 && exts.Count > 0)
+                    patron = new Regex("/(" + modPat + ")\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
+                else if (mods.Count > 0)
+                    patron = new Regex("/(" + modPat + ")(\\.[A-Za-z0-9]+)?$", RegexOptions.IgnoreCase);
+                else if (exts.Count > 0)
+                    patron = new Regex("\\.(" + extPat + ")$", RegexOptions.IgnoreCase);
+                else
+                    patron = new Regex(".", RegexOptions.IgnoreCase);
+                var patronOtraX = new Regex("/(" + modPat + ")\\.([A-Za-z0-9]+)$", RegexOptions.IgnoreCase);
+
+                string vcsNombre = kind == VcsKind.Git ? "Git" : "SVN";
+                string prefRev = kind == VcsKind.Git ? "" : "r";
+                progress(0, 1, "Consultando log " + vcsNombre + (branch.Length > 0 ? " (rama: " + branch + ")" : "") + "...");
+                List<LogEntry> entradas;
+                if (kind == VcsKind.Git)
                 {
-                    string baseNm = BaseName(t.Path);
-                    string modNombre = baseNm.Split('.')[0].ToUpperInvariant();
-                    int cnt;
-                    modCount.TryGetValue(modNombre, out cnt);
-                    modCount[modNombre] = cnt + 1;
-                    totArchivos++;
+                    entradas = GitLogEntries(dirGit, opt.Desde, opt.Hasta, patron, branch);
+                }
+                else
+                {
+                    string rango = RevExpr(opt.Desde) + ":" + RevExpr(opt.Hasta);
+                    entradas = LogEntries(url, rango, patron);
+                }
+                progress(0, 1, "Log " + vcsNombre + ": " + entradas.Count + " commit(s) total(es), rango " + opt.Desde + " -> " + opt.Hasta);
+                var matched = entradas.Where(e => e.Targets.Count > 0).ToList();
+                if (opt.ExcluirMvnRelease) matched = matched.Where(e => !EsCommitMavenRelease(e.Msg)).ToList();
+                if (opt.ExcluirMvnPrepare) matched = matched.Where(e => !EsCommitMavenPrepare(e.Msg)).ToList();
+                if (orden == "desc") matched.Reverse();
 
-                    var fd = new FileDiff { Action = t.Action, Path = t.Path };
-                    if (t.Action == "D")
+                var parsedPorRev = new Dictionary<string, List<KeyValuePair<string, FileDiff>>>();
+                var modCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                int totArchivos = 0, totHunks = 0, idx = 0, svnPomFallos = 0;
+
+                foreach (var e in matched)
+                {
+                    idx++;
+                    if (cancelado()) throw new OperationCanceledException("Operacion cancelada por el usuario.");
+                    progress(idx, matched.Count, "Descargando diff " + prefRev + e.Rev + "  (" + idx + "/" + matched.Count + ")");
+
+                    e.Versiones = VersionesDeMensaje(e.Msg);
+                    if (e.Versiones.Count == 0)
                     {
-                        fd.Deleted = true;
+                        string vPom = "";
+                        if (kind == VcsKind.Git)
+                            vPom = PomVersionGit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev);
+                        else if (svnPomFallos < 2)
+                        {
+                            vPom = PomVersionSvn(url, e.Rev);
+                            if (vPom.Length == 0) svnPomFallos++;
+                        }
+                        if (vPom.Length > 0) e.Versiones.Add(vPom);
+                    }
+
+                    string texto = kind == VcsKind.Git
+                        ? GitDiffCommit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev, e.Targets)
+                        : DiffRevision(root, e.Rev, e.Targets);
+                    string errRev = null;
+                    Dictionary<string, List<string>> secciones;
+                    if (texto.StartsWith("@@ERROR@@"))
+                    {
+                        errRev = texto.Substring(9);
+                        secciones = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
                     }
                     else
                     {
-                        List<string> sec;
-                        if (!secciones.TryGetValue(baseNm, out sec))
+                        secciones = kind == VcsKind.Git ? SplitSeccionesGit(texto) : SplitSecciones(texto);
+                    }
+
+                    var archivos = new List<KeyValuePair<string, FileDiff>>();
+                    foreach (var t in e.Targets.OrderBy(x => BaseName(x.Path), StringComparer.OrdinalIgnoreCase))
+                    {
+                        string baseNm = BaseName(t.Path);
+                        string modNombre = baseNm.Split('.')[0].ToUpperInvariant();
+                        int cnt;
+                        modCount.TryGetValue(modNombre, out cnt);
+                        modCount[modNombre] = cnt + 1;
+                        totArchivos++;
+
+                        var fd = new FileDiff { Action = t.Action, Path = t.Path };
+                        if (t.Action == "D")
                         {
-                            fd.Missing = true;
-                            fd.Err = errRev;
+                            fd.Deleted = true;
                         }
                         else
                         {
-                            bool binario, soloProp;
-                            fd.Hunks = ParseHunks(sec, out binario, out soloProp);
-                            fd.Binario = binario;
-                            fd.SoloProp = soloProp;
-                            totHunks += fd.Hunks.Count;
-                            if (opt.IncluirResumen && fd.Hunks.Count > 0)
-                                fd.Resumen = ResumenArchivo(fd.Hunks);
+                            List<string> sec;
+                            if (!secciones.TryGetValue(baseNm, out sec))
+                            {
+                                fd.Missing = true;
+                                fd.Err = errRev;
+                            }
+                            else
+                            {
+                                bool binario, soloProp;
+                                fd.Hunks = ParseHunks(sec, out binario, out soloProp);
+                                fd.Binario = binario;
+                                fd.SoloProp = soloProp;
+                                totHunks += fd.Hunks.Count;
+                                if (opt.IncluirResumen && fd.Hunks.Count > 0)
+                                    fd.Resumen = ResumenArchivo(fd.Hunks);
+                            }
                         }
+                        archivos.Add(new KeyValuePair<string, FileDiff>(baseNm, fd));
                     }
-                    archivos.Add(new KeyValuePair<string, FileDiff>(baseNm, fd));
+                    parsedPorRev[e.Rev] = archivos;
                 }
-                parsedPorRev[e.Rev] = archivos;
+
+                progress(matched.Count, Math.Max(1, matched.Count), "Generando documento HTML...");
+
+                string html = BuildHtml(opt, kind, url, mods, exts, entradas, matched, parsedPorRev, modCount, patronOtraX);
+
+                string htmlPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ReporteCambios_" + Guid.NewGuid().ToString("N") + ".html");
+                File.WriteAllText(htmlPath, html, new UTF8Encoding(true));
+
+                var res = new ReportResult
+                {
+                    Salida = htmlPath,
+                    Revisiones = matched.Count,
+                    Archivos = totArchivos,
+                    Bloques = totHunks
+                };
+                res.SinCambios = mods.Where(m => !modCount.ContainsKey(m)).ToList();
+                return res;
             }
-
-            progress(matched.Count, Math.Max(1, matched.Count), "Generando documento HTML...");
-
-            string html = BuildHtml(opt, kind, url, mods, exts, entradas, matched, parsedPorRev, modCount, patronOtraX);
-
-            string htmlPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ReporteCambios_" + Guid.NewGuid().ToString("N") + ".html");
-            File.WriteAllText(htmlPath, html, new UTF8Encoding(true));
-
-            var res = new ReportResult
+            finally
             {
-                Salida = htmlPath,
-                Revisiones = matched.Count,
-                Archivos = totArchivos,
-                Bloques = totHunks
-            };
-            res.SinCambios = mods.Where(m => !modCount.ContainsKey(m)).ToList();
-            return res;
+                if (tempCloneDir != null && Directory.Exists(tempCloneDir))
+                {
+                    try { Directory.Delete(tempCloneDir, true); } catch { }
+                }
+            }
         }
 
         public static void ExportarPdf(string htmlPath, string pdfPath)
@@ -207,7 +251,16 @@ namespace ReporteCambiosSvn
             string v = (vcsOpt ?? "auto").Trim().ToLowerInvariant();
             if (v == "svn") return VcsKind.Svn;
             if (v == "git") return VcsKind.Git;
-            if (Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://")) return VcsKind.Svn;
+            if (Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://"))
+            {
+                if (objetivo.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ||
+                    objetivo.Contains("://git@") || objetivo.Contains("://git.") ||
+                    Regex.IsMatch(objetivo, "^https?://[^/]+/[^/]+/[^/]+\\.git"))
+                    return VcsKind.Git;
+                return VcsKind.Svn;
+            }
+            if (Regex.IsMatch(objetivo, "^(git|ssh)://")) return VcsKind.Git;
+            if (Regex.IsMatch(objetivo, "^git@[^:]+:.+")) return VcsKind.Git;
             if (Directory.Exists(objetivo))
             {
                 if (Directory.Exists(System.IO.Path.Combine(objetivo, ".svn"))) return VcsKind.Svn;
@@ -218,6 +271,36 @@ namespace ReporteCambiosSvn
                 }
             }
             return VcsKind.Svn;
+        }
+
+        public static List<string> ListarRamas(string objetivo, string vcsOpt)
+        {
+            var res = new List<string>();
+            VcsKind kind = DetectarVcs(objetivo, vcsOpt);
+            if (kind == VcsKind.Svn)
+            {
+                if (!Svn.Disponible()) return res;
+                string urlCheck = objetivo;
+                if (!Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://") && Directory.Exists(objetivo))
+                {
+                    string u, r;
+                    try { InfoXml(objetivo, out u, out r); urlCheck = r; } catch { return res; }
+                }
+                else if (Regex.IsMatch(objetivo, "^[A-Za-z][A-Za-z0-9+.\\-]*://"))
+                {
+                    string u, r;
+                    try { InfoXml(objetivo, out u, out r); urlCheck = r; } catch { return res; }
+                }
+                return Svn.ListBranches(urlCheck);
+            }
+            else
+            {
+                if (!Git.Disponible()) return res;
+                if (EsUrlRemota(objetivo))
+                    return Git.ListRemoteBranches(objetivo);
+                else
+                    return Git.ListLocalBranches(objetivo);
+            }
         }
 
         public static List<string> VersionesDeMensaje(string msg)
@@ -240,7 +323,7 @@ namespace ReporteCambiosSvn
         }
 
         // ------------------------------------------------------------- GIT
-        private static List<LogEntry> GitLogEntries(string dir, string desde, string hasta, Regex patron)
+        private static List<LogEntry> GitLogEntries(string dir, string desde, string hasta, Regex patron, string branch = "")
         {
             var args = new List<string> { "-c", "core.quotepath=off", "-C", dir, "log", "--reverse", "--no-color",
                 "--date=iso-strict", "--name-status",
@@ -248,6 +331,8 @@ namespace ReporteCambiosSvn
             string d = (desde ?? "").Trim();
             string h = (hasta ?? "").Trim();
             string rangoRev = null;
+            string b = (branch ?? "").Trim();
+            if (b.Equals("trunk", StringComparison.OrdinalIgnoreCase)) b = "";
             if (d.Length > 0 && !EsFecha(d))
             {
                 string fin = (h.Length > 0 && !EsFecha(h)) ? h : "HEAD";
@@ -260,6 +345,7 @@ namespace ReporteCambiosSvn
             if (EsFecha(h)) args.Add("--until=" + h);
             else if (rangoRev == null && h.Length > 0 && !h.Equals("HEAD", StringComparison.OrdinalIgnoreCase)) rangoRev = h;
             if (rangoRev != null) args.Add(rangoRev);
+            if (b.Length > 0) args.Insert(5, b);
 
             var r = Git.Run(args);
             if (r.ExitCode != 0)

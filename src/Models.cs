@@ -38,6 +38,7 @@ namespace ReporteCambiosSvn
         public string Autor = "";
         public string Vcs = "auto";
         public string Orden = "asc";
+        public string Branch = "";
         public bool ExcluirMvnRelease = false;
         public bool ExcluirMvnPrepare = false;
         public bool ExportarZip = false;
