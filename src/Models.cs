@@ -45,6 +45,7 @@ namespace ReporteCambiosSvn
         public List<string> Modulos = new List<string>();
         public List<string> Extensiones = new List<string>();
         public bool IncluirResumen = true;
+        public bool IncluirOtrasRutas = true;
         public bool AbrirAlTerminar = false;
         public bool ExportarPdf = false;
         public string SalidaPdf = "";

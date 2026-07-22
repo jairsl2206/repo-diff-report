@@ -998,7 +998,7 @@ a{color:#004D6B;text-decoration:none} a:hover{text-decoration:underline;color:#0
                     sb.Append("</details>" + nl);
                 }
 
-                if (e.Others.Count > 0)
+                if (e.Others.Count > 0 && opt.IncluirOtrasRutas)
                 {
                     sb.Append("<details class='file'><summary class='small'>Otras rutas modificadas en esta revisi&oacute;n (fuera del filtro): " +
                               e.Others.Count + "</summary><div style='padding:8px 12px;font-size:11px'>" + nl);

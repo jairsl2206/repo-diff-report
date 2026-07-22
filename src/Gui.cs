@@ -38,7 +38,7 @@ namespace ReporteCambiosSvn
 
         private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor, txtLog;
         private ComboBox cboOrden, cboBranch;
-        private CheckBox chkResumen, chkExclRel, chkExclPrep;
+        private CheckBox chkResumen, chkExclRel, chkExclPrep, chkOtrasRutas;
         private ProgressBar pb;
         private Label lblEstado;
         private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida, btnBranch;
@@ -108,7 +108,8 @@ namespace ReporteCambiosSvn
                     "branch=" + (cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : ""),
                     "exclrelease=" + (chkExclRel.Checked ? "1" : "0"),
                     "exclprepare=" + (chkExclPrep.Checked ? "1" : "0"),
-                    "resumen=" + (chkResumen.Checked ? "1" : "0")
+                    "resumen=" + (chkResumen.Checked ? "1" : "0"),
+                    "otrasrutas=" + (chkOtrasRutas.Checked ? "1" : "0")
                 };
                 File.WriteAllLines(ConfigPath, lineas, new UTF8Encoding(true));
             }
@@ -143,6 +144,7 @@ namespace ReporteCambiosSvn
                 if (cfg.TryGetValue("exclrelease", out v)) chkExclRel.Checked = v == "1";
                 if (cfg.TryGetValue("exclprepare", out v)) chkExclPrep.Checked = v == "1";
                 if (cfg.TryGetValue("resumen", out v)) chkResumen.Checked = v != "0";
+                if (cfg.TryGetValue("otrasrutas", out v)) chkOtrasRutas.Checked = v != "0";
             }
             catch { }
         }
@@ -150,7 +152,7 @@ namespace ReporteCambiosSvn
         public MainForm()
         {
             Text = "Reporte de cambios por modulo";
-            ClientSize = new Size(704, 710);
+            ClientSize = new Size(704, 732);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -240,6 +242,15 @@ namespace ReporteCambiosSvn
             chkResumen.Checked = true;
             Controls.Add(chkResumen);
             tips.SetToolTip(chkResumen, TtResumen);
+
+            y += 22;
+            chkOtrasRutas = new CheckBox();
+            chkOtrasRutas.Text = "Incluir seccion 'Otras rutas (fuera del filtro)'";
+            chkOtrasRutas.Location = new Point(320, y - 2);
+            chkOtrasRutas.Size = new Size(370, 23);
+            chkOtrasRutas.Checked = true;
+            Controls.Add(chkOtrasRutas);
+            tips.SetToolTip(chkOtrasRutas, "Muestra en cada revision las rutas modificadas que no coinciden con el filtro de archivos/extensiones.");
 
             y += 38;
             var lAutor = AddLbl("Autor del reporte:", 15, y, 280);
@@ -482,6 +493,7 @@ namespace ReporteCambiosSvn
                 opt.ExcluirMvnRelease = chkExclRel.Checked;
                 opt.ExcluirMvnPrepare = chkExclPrep.Checked;
                 opt.IncluirResumen = chkResumen.Checked;
+                opt.IncluirOtrasRutas = chkOtrasRutas.Checked;
                 opt.Branch = cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : "";
 
                 GuardarConfig();
@@ -512,7 +524,7 @@ namespace ReporteCambiosSvn
             cboOrden.Enabled = !busy; cboBranch.Enabled = !busy;
             chkExclRel.Enabled = !busy; chkExclPrep.Enabled = !busy;
             btnDir.Enabled = !busy; btnSalida.Enabled = !busy; btnBranch.Enabled = !busy;
-            chkResumen.Enabled = !busy;
+            chkResumen.Enabled = !busy; chkOtrasRutas.Enabled = !busy;
         }
 
         private void Bw_DoWork(object sender, DoWorkEventArgs e)
@@ -733,9 +745,10 @@ namespace ReporteCambiosSvn
                    "  ReporteCambios.exe                          (interfaz grafica)\r\n" +
                    "  ReporteCambios.exe -ProjectPath <url|carpeta> -Desde <fecha|rev>\r\n" +
                    "      [-Hasta <fecha|rev|HEAD>] [-Archivos \"A,B,C\"] [-Extensiones \"BAS,DAT\"]\r\n" +
-                   "      [-Salida archivo.html] [-SinResumen] [-AbrirAlTerminar]\r\n" +
+                   "      [-Salida archivo.html] [-AbrirAlTerminar]\r\n" +
                    "      [-Autor \"Nombre\"] [-Vcs auto|svn|git] [-Orden asc|desc]\r\n" +
                    "      [-Branch <rama>] [-ExcluirMvnRelease] [-ExcluirMvnPrepare]\r\n" +
+                   "      [-SinResumen] [-SinOtrasRutas]\r\n" +
                    "Notas: -Modulos es alias de -Archivos. Sin -Archivos y/o sin -Extensiones\r\n" +
                    "       se incluyen TODOS los archivos / cualquier extension.\r\n" +
                    "       Soporta SVN (URL o working copy) y Git (URL remota git@... o carpeta local).\r\n" +
@@ -764,6 +777,7 @@ namespace ReporteCambiosSvn
                 else if (a == "-excluirmvnprepare") opt.ExcluirMvnPrepare = true;
                 else if (a == "-zip") opt.ExportarZip = true;
                 else if (a == "-sinresumen") opt.IncluirResumen = false;
+                else if (a == "-sinotrasrutas") opt.IncluirOtrasRutas = false;
                 else if (a == "-abriralterminar") opt.AbrirAlTerminar = true;
                 else if (a == "-pdf") opt.ExportarPdf = true;
                 else if (a == "-salidapdf") { opt.SalidaPdf = Next(args, ref i, a); opt.ExportarPdf = true; }
