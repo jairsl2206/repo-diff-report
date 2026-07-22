@@ -38,7 +38,7 @@ namespace ReporteCambiosSvn
 
         private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor, txtLog;
         private ComboBox cboOrden, cboBranch;
-        private CheckBox chkResumen, chkExclRel, chkExclPrep, chkOtrasRutas;
+        private CheckBox chkResumen, chkExclRel, chkExclPrep, chkOtrasRutas, chkIgnorarWs;
         private ProgressBar pb;
         private Label lblEstado;
         private Button btnGo, btnCancel, btnCerrar, btnDir, btnSalida, btnBranch;
@@ -109,7 +109,8 @@ namespace ReporteCambiosSvn
                     "exclrelease=" + (chkExclRel.Checked ? "1" : "0"),
                     "exclprepare=" + (chkExclPrep.Checked ? "1" : "0"),
                     "resumen=" + (chkResumen.Checked ? "1" : "0"),
-                    "otrasrutas=" + (chkOtrasRutas.Checked ? "1" : "0")
+                    "otrasrutas=" + (chkOtrasRutas.Checked ? "1" : "0"),
+                    "ignorarws=" + (chkIgnorarWs.Checked ? "1" : "0")
                 };
                 File.WriteAllLines(ConfigPath, lineas, new UTF8Encoding(true));
             }
@@ -145,6 +146,7 @@ namespace ReporteCambiosSvn
                 if (cfg.TryGetValue("exclprepare", out v)) chkExclPrep.Checked = v == "1";
                 if (cfg.TryGetValue("resumen", out v)) chkResumen.Checked = v != "0";
                 if (cfg.TryGetValue("otrasrutas", out v)) chkOtrasRutas.Checked = v != "0";
+                if (cfg.TryGetValue("ignorarws", out v)) chkIgnorarWs.Checked = v != "0";
             }
             catch { }
         }
@@ -152,7 +154,7 @@ namespace ReporteCambiosSvn
         public MainForm()
         {
             Text = "Reporte de cambios por modulo";
-            ClientSize = new Size(704, 732);
+            ClientSize = new Size(704, 754);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -251,6 +253,15 @@ namespace ReporteCambiosSvn
             chkOtrasRutas.Checked = true;
             Controls.Add(chkOtrasRutas);
             tips.SetToolTip(chkOtrasRutas, "Muestra en cada revision las rutas modificadas que no coinciden con el filtro de archivos/extensiones.");
+
+            y += 22;
+            chkIgnorarWs = new CheckBox();
+            chkIgnorarWs.Text = "Ignorar cambios solo de formato (diff -w)";
+            chkIgnorarWs.Location = new Point(320, y - 2);
+            chkIgnorarWs.Size = new Size(370, 23);
+            chkIgnorarWs.Checked = true;
+            Controls.Add(chkIgnorarWs);
+            tips.SetToolTip(chkIgnorarWs, "Usa git diff -w / svn diff -x -w para ignorar cambios de espacios, tabs y saltos de linea.\r\nUtil cuando hay commits que reformatean todo el archivo (indentacion, CRLF↔LF).");
 
             y += 38;
             var lAutor = AddLbl("Autor del reporte:", 15, y, 280);
@@ -494,6 +505,7 @@ namespace ReporteCambiosSvn
                 opt.ExcluirMvnPrepare = chkExclPrep.Checked;
                 opt.IncluirResumen = chkResumen.Checked;
                 opt.IncluirOtrasRutas = chkOtrasRutas.Checked;
+                opt.IgnorarWhitespace = chkIgnorarWs.Checked;
                 opt.Branch = cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : "";
 
                 GuardarConfig();
@@ -524,7 +536,7 @@ namespace ReporteCambiosSvn
             cboOrden.Enabled = !busy; cboBranch.Enabled = !busy;
             chkExclRel.Enabled = !busy; chkExclPrep.Enabled = !busy;
             btnDir.Enabled = !busy; btnSalida.Enabled = !busy; btnBranch.Enabled = !busy;
-            chkResumen.Enabled = !busy; chkOtrasRutas.Enabled = !busy;
+            chkResumen.Enabled = !busy; chkOtrasRutas.Enabled = !busy; chkIgnorarWs.Enabled = !busy;
         }
 
         private void Bw_DoWork(object sender, DoWorkEventArgs e)
@@ -748,7 +760,7 @@ namespace ReporteCambiosSvn
                    "      [-Salida archivo.html] [-AbrirAlTerminar]\r\n" +
                    "      [-Autor \"Nombre\"] [-Vcs auto|svn|git] [-Orden asc|desc]\r\n" +
                    "      [-Branch <rama>] [-ExcluirMvnRelease] [-ExcluirMvnPrepare]\r\n" +
-                   "      [-SinResumen] [-SinOtrasRutas]\r\n" +
+                   "      [-SinResumen] [-SinOtrasRutas] [-SinIgnorarWs]\r\n" +
                    "Notas: -Modulos es alias de -Archivos. Sin -Archivos y/o sin -Extensiones\r\n" +
                    "       se incluyen TODOS los archivos / cualquier extension.\r\n" +
                    "       Soporta SVN (URL o working copy) y Git (URL remota git@... o carpeta local).\r\n" +
@@ -778,6 +790,7 @@ namespace ReporteCambiosSvn
                 else if (a == "-zip") opt.ExportarZip = true;
                 else if (a == "-sinresumen") opt.IncluirResumen = false;
                 else if (a == "-sinotrasrutas") opt.IncluirOtrasRutas = false;
+                else if (a == "-sinignorarws") opt.IgnorarWhitespace = false;
                 else if (a == "-abriralterminar") opt.AbrirAlTerminar = true;
                 else if (a == "-pdf") opt.ExportarPdf = true;
                 else if (a == "-salidapdf") { opt.SalidaPdf = Next(args, ref i, a); opt.ExportarPdf = true; }

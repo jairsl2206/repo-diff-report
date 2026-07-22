@@ -146,8 +146,8 @@ namespace ReporteCambiosSvn
                     }
 
                     string texto = kind == VcsKind.Git
-                        ? GitDiffCommit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev, e.Targets)
-                        : DiffRevision(root, e.Rev, e.Targets);
+                        ? GitDiffCommit(dirGit, e.FullRev.Length > 0 ? e.FullRev : e.Rev, e.Targets, opt.IgnorarWhitespace)
+                        : DiffRevision(root, e.Rev, e.Targets, opt.IgnorarWhitespace);
                     string errRev = null;
                     Dictionary<string, List<string>> secciones;
                     if (texto.StartsWith("@@ERROR@@"))
@@ -390,18 +390,24 @@ namespace ReporteCambiosSvn
             return lista;
         }
 
-        private static string GitDiffCommit(string dir, string fullRev, List<PathItem> targets)
+        private static string GitDiffCommit(string dir, string fullRev, List<PathItem> targets, bool ignorarWs = true)
         {
             var rutas = targets.Where(t => t.Action != "D").Select(t => t.Path.TrimStart('/')).ToList();
             if (rutas.Count == 0) return "";
-            var args = new List<string> { "-c", "core.quotepath=off", "-C", dir, "diff", "--no-color", "--unified=3",
-                fullRev + "^", fullRev, "--" };
+            var args = new List<string> { "-c", "core.quotepath=off", "-C", dir, "diff", "--no-color", "--unified=3" };
+            if (ignorarWs) args.Add("-w");
+            args.Add(fullRev + "^");
+            args.Add(fullRev);
+            args.Add("--");
             args.AddRange(rutas);
             var r = Git.Run(args);
             if (r.ExitCode != 0)
             {
-                var args2 = new List<string> { "-c", "core.quotepath=off", "-C", dir, "show", "--no-color", "--unified=3",
-                    "--format=", fullRev, "--" };
+                var args2 = new List<string> { "-c", "core.quotepath=off", "-C", dir, "show", "--no-color", "--unified=3" };
+                if (ignorarWs) args2.Add("-w");
+                args2.Add("--format=");
+                args2.Add(fullRev);
+                args2.Add("--");
                 args2.AddRange(rutas);
                 r = Git.Run(args2);
                 if (r.ExitCode != 0 && r.Bytes.Length == 0)
@@ -512,11 +518,12 @@ namespace ReporteCambiosSvn
             return lista;
         }
 
-        private static string DiffRevision(string root, string rev, List<PathItem> targets)
+        private static string DiffRevision(string root, string rev, List<PathItem> targets, bool ignorarWs = true)
         {
             var urls = targets.Where(t => t.Action != "D").Select(t => root + t.Path + "@" + rev).ToList();
             if (urls.Count == 0) return "";
             var args = new List<string> { "diff", "--non-interactive", "-c", rev };
+            if (ignorarWs) { args.Add("-x"); args.Add("-w"); }
             args.AddRange(urls);
             var r = Svn.RunRaw(args);
             if (r.ExitCode != 0 && r.Bytes.Length == 0)
