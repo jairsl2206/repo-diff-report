@@ -65,13 +65,16 @@ namespace ReporteCambiosSvn
                 {
                     url = objetivo;
                     tempCloneDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RepoCambiosGit_" + Guid.NewGuid().ToString("N"));
-                    var cloneArgs = new List<string> { "clone", "--single-branch" };
+                    var cloneArgs = new List<string> { "clone", "--no-checkout", "--single-branch" };
                     if (branch.Length > 0) { cloneArgs.Add("-b"); cloneArgs.Add(branch); }
                     cloneArgs.Add(objetivo);
                     cloneArgs.Add(tempCloneDir);
                     var cr = Git.Run(cloneArgs);
                     if (cr.ExitCode != 0)
                         throw new InvalidOperationException("No se pudo clonar el repositorio Git remoto. Verifique que tiene acceso (SSH/HTTPS) y que la URL es correcta.\r\n" + cr.StdErr);
+                    var co = Git.Run(new[] { "-C", tempCloneDir, "checkout", "HEAD" });
+                    if (co.ExitCode != 0)
+                        throw new InvalidOperationException("No se pudo hacer checkout en el clon temporal. El repositorio puede tener hooks que interfieren.\r\n" + co.StdErr);
                     dirGit = tempCloneDir;
                     progress(0, 2, "Clon completado. Analizando repositorio Git remoto...");
                 }

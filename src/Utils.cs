@@ -87,6 +87,7 @@ namespace ReporteCambiosSvn
         private static readonly Dictionary<string, string> _gitEnv = new Dictionary<string, string>
         {
             { "GIT_TERMINAL_PROMPT", "0" },
+            { "GIT_CLONE_PROTECTION_ACTIVE", "false" },
             { "GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" }
         };
 
