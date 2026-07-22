@@ -87,7 +87,6 @@ namespace ReporteCambiosSvn
         private static readonly Dictionary<string, string> _gitEnv = new Dictionary<string, string>
         {
             { "GIT_TERMINAL_PROMPT", "0" },
-            { "GIT_ASKPASS", "echo" },
             { "GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" }
         };
 
@@ -129,13 +128,34 @@ namespace ReporteCambiosSvn
             var res = new List<string>();
             if (!Disponible()) return res;
             var r = Run(new[] { "-C", dir, "branch", "--format=%(refname:short)" });
-            if (r.ExitCode != 0) return res;
-            string texto = Texto.DecodeBytes(r.Bytes);
-            foreach (var linea in Regex.Split(texto, "\r?\n"))
+            if (r.ExitCode == 0)
             {
-                var t = linea.Trim();
-                if (t.Length > 0) res.Add(t);
+                string texto = Texto.DecodeBytes(r.Bytes);
+                foreach (var linea in Regex.Split(texto, "\r?\n"))
+                {
+                    var t = linea.Trim();
+                    if (t.Length > 0) res.Add(t);
+                }
             }
+            var rr = Run(new[] { "-C", dir, "branch", "-r", "--format=%(refname:short)" });
+            if (rr.ExitCode == 0)
+            {
+                string texto = Texto.DecodeBytes(rr.Bytes);
+                foreach (var linea in Regex.Split(texto, "\r?\n"))
+                {
+                    var t = linea.Trim();
+                    if (t.Length == 0) continue;
+                    string prefix = "origin/";
+                    if (t.StartsWith(prefix))
+                    {
+                        string name = t.Substring(prefix.Length);
+                        if (name.Length > 0 && !name.Equals("HEAD", StringComparison.OrdinalIgnoreCase)
+                            && !res.Contains(name))
+                            res.Add(name);
+                    }
+                }
+            }
+            res.Sort(StringComparer.OrdinalIgnoreCase);
             return res;
         }
 

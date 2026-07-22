@@ -36,7 +36,7 @@ namespace ReporteCambiosSvn
         private const string TtExclPrep = "Omite los commits del maven-release-plugin que saltan a la siguiente version SNAPSHOT:\r\nmensajes '[maven-release-plugin] prepare for next development iteration'.";
         private const string TtEstado = "Requisito: svn.exe (repos SVN) y/o git.exe (repos Git) en el PATH.";
 
-        private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor;
+        private TextBox txtProj, txtDesde, txtHasta, txtMods, txtExts, txtSalida, txtAutor, txtLog;
         private ComboBox cboOrden, cboBranch;
         private CheckBox chkResumen, chkExclRel, chkExclPrep;
         private ProgressBar pb;
@@ -150,7 +150,7 @@ namespace ReporteCambiosSvn
         public MainForm()
         {
             Text = "Reporte de cambios por modulo";
-            ClientSize = new Size(704, 630);
+            ClientSize = new Size(704, 710);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -296,7 +296,22 @@ namespace ReporteCambiosSvn
             lblEstado = AddLbl("Listo.", 15, y, 675);
             tips.SetToolTip(lblEstado, TtEstado);
 
-            y += 28;
+            y += 22;
+            AddLbl("Log:", 15, y, 100);
+            y += 16;
+            txtLog = new TextBox();
+            txtLog.Location = new Point(15, y);
+            txtLog.Size = new Size(675, 55);
+            txtLog.Multiline = true;
+            txtLog.ScrollBars = ScrollBars.Vertical;
+            txtLog.ReadOnly = true;
+            txtLog.BackColor = SystemColors.Window;
+            txtLog.Font = new Font("Consolas", 8f);
+            txtLog.Text = "";
+            Controls.Add(txtLog);
+            tips.SetToolTip(txtLog, "Registro de traza. Muestra los comandos ejecutados y su resultado para diagnosticar fallos.");
+
+            y += 60;
             btnGo = AddBtn("Generar reporte", 15, y, 140, 30);
             btnGo.Click += BtnGo_Click;
             btnCancel = AddBtn("Cancelar", 165, y, 100, 30);
@@ -354,6 +369,9 @@ namespace ReporteCambiosSvn
             using (var dlg = new FolderBrowserDialog())
             {
                 dlg.Description = "Seleccione la carpeta del repositorio local (SVN o Git)";
+                string actual = txtProj.Text.Trim();
+                if (actual.Length > 0 && Directory.Exists(actual))
+                    dlg.SelectedPath = actual;
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
                     txtProj.Text = dlg.SelectedPath;
@@ -370,6 +388,7 @@ namespace ReporteCambiosSvn
         private void CargarRamas()
         {
             string proyecto = txtProj.Text.Trim();
+            LogMsg("Consultando ramas para: " + proyecto);
             if (proyecto.Length == 0)
             {
                 var status = Controls.Find("lblBranchStatus", true);
@@ -382,6 +401,7 @@ namespace ReporteCambiosSvn
             try
             {
                 var ramas = Engine.ListarRamas(proyecto, "auto");
+                LogMsg("Ramas encontradas: " + ramas.Count + " (" + string.Join(", ", ramas) + ")");
                 string anterior = cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : "";
                 cboBranch.Items.Clear();
                 if (ramas.Count == 0)
@@ -406,6 +426,7 @@ namespace ReporteCambiosSvn
             }
             catch (Exception ex)
             {
+                LogMsg("Error al consultar ramas: " + ex.Message);
                 if (statusLbl.Length > 0) statusLbl[0].Text = "Error: " + ex.Message;
             }
             finally
@@ -422,6 +443,18 @@ namespace ReporteCambiosSvn
                 dlg.FileName = "REPORTE_CAMBIOS.pdf";
                 if (dlg.ShowDialog(this) == DialogResult.OK) txtSalida.Text = dlg.FileName;
             }
+        }
+
+        private void LogMsg(string msg)
+        {
+            if (txtLog == null || string.IsNullOrEmpty(msg)) return;
+            if (txtLog.InvokeRequired)
+            {
+                txtLog.BeginInvoke((Action)(() => LogMsg(msg)));
+                return;
+            }
+            string ts = DateTime.Now.ToString("HH:mm:ss");
+            txtLog.AppendText("[" + ts + "] " + msg + "\r\n");
         }
 
         private void BtnCancel_Click(object sender, EventArgs e)
@@ -452,12 +485,18 @@ namespace ReporteCambiosSvn
                 opt.Branch = cboBranch.SelectedItem != null ? cboBranch.SelectedItem.ToString() : "";
 
                 GuardarConfig();
+                txtLog.Text = "";
+                LogMsg("Iniciando generacion de reporte...");
+                LogMsg("Proyecto: " + opt.ProjectPath);
+                LogMsg("Rango: " + opt.Desde + " -> " + opt.Hasta);
+                if (opt.Branch.Length > 0) LogMsg("Rama: " + opt.Branch);
                 SetBusy(true);
                 pb.Value = 0;
                 bw.RunWorkerAsync(opt);
             }
             catch (Exception ex)
             {
+                LogMsg("ERROR: " + ex.Message);
                 MessageBox.Show(this, ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -490,7 +529,9 @@ namespace ReporteCambiosSvn
         private void Bw_ProgressChanged(object sender, ProgressChangedEventArgs e)
         {
             pb.Value = Math.Max(0, Math.Min(100, e.ProgressPercentage));
-            lblEstado.Text = (string)(e.UserState ?? "");
+            string msg = (string)(e.UserState ?? "");
+            lblEstado.Text = msg;
+            LogMsg(msg);
         }
 
         private void Bw_RunWorkerCompleted(object sender, RunWorkerCompletedEventArgs e)
@@ -498,12 +539,14 @@ namespace ReporteCambiosSvn
             SetBusy(false);
             if (e.Error is OperationCanceledException)
             {
+                LogMsg("Operacion cancelada por el usuario.");
                 lblEstado.Text = "Operacion cancelada.";
                 pb.Value = 0;
                 return;
             }
             if (e.Error != null)
             {
+                LogMsg("ERROR: " + e.Error.Message);
                 lblEstado.Text = "Error.";
                 MessageBox.Show(this, e.Error.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -511,6 +554,9 @@ namespace ReporteCambiosSvn
             var res = (ReportResult)e.Result;
             pb.Value = 100;
             lblEstado.Text = "Listo: " + res.Salida;
+            LogMsg("Reporte generado: " + res.Salida);
+            LogMsg("Revisiones: " + res.Revisiones + ", Archivos: " + res.Archivos + ", Bloques: " + res.Bloques);
+            if (res.SinCambios.Count > 0) LogMsg("Sin cambios: " + string.Join(", ", res.SinCambios));
 
             using (var rf = new ResultForm(res))
                 rf.ShowDialog(this);
